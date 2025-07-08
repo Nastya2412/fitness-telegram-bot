@@ -30,7 +30,7 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 
 # Настройки оплаты
-PAYMENT_PHONE = "+996 555 123 456"  # Замените на ваш номер телефона
+PAYMENT_PHONE = "+996995311919"  # Замените на ваш номер телефона
 QR_CODE_PATH = "qr_code.jpg"        # Путь к QR коду в репозитории
 
 print(f"🔑 BOT_TOKEN: {'✅ Загружен' if BOT_TOKEN else '❌ Отсутствует'}")
