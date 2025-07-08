@@ -25,14 +25,14 @@ print("🔧 .env файл загружен")
 # Настройки из переменных окружения (поддержка и локальной разработки, и Render)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else None
-GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")  # Для Render.com
 
 print(f"🔑 BOT_TOKEN: {'✅ Загружен' if BOT_TOKEN else '❌ Отсутствует'}")
 print(f"👨‍💼 ADMIN_ID: {'✅ ' + str(ADMIN_ID) if ADMIN_ID else '❌ Отсутствует'}")
 print(f"📊 GOOGLE_CREDENTIALS_FILE: {'✅ ' + str(GOOGLE_CREDENTIALS_FILE) if GOOGLE_CREDENTIALS_FILE else '❌ Отсутствует'}")
-print(f"📊 GOOGLE_CREDENTIALS_JSON: {'✅ Переменная окружения' if GOOGLE_CREDENTIALS_JSON else '❌ Отсутствует'}")
+print(f"📊 GOOGLE_CREDENTIALS: {'✅ Переменная окружения' if GOOGLE_CREDENTIALS_JSON else '❌ Отсутствует'}")
 print(f"📋 SPREADSHEET_ID: {'✅ Загружен' if SPREADSHEET_ID else '❌ Отсутствует'}")
 
 # Проверяем обязательные переменные
