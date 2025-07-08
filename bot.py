@@ -452,6 +452,7 @@ def get_admin_menu():
         keyboard=[
             [KeyboardButton(text="⚙️ Настройки бота")],
             [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="📝 Правила")],
+            [KeyboardButton(text="📋 Проверить платежи")],  # ← НОВАЯ КНОПКА
             [KeyboardButton(text="✏️ Изменить правила")],
             [KeyboardButton(text="🏠 Главное меню")]
         ],
@@ -511,6 +512,7 @@ async def update_payment_status(user_id: int, amount: float, new_status: str, ad
         print(f"🔍 Всего платежей в таблице: {len(payments)}")
         
         # Ищем платеж для обновления
+        found_payment_row = None
         for i, payment in enumerate(payments, start=2):  # start=2 потому что строка 1 - заголовки
             print(f"🔍 Проверяем платеж {i-1}: telegram_id={payment.get('telegram_id')}, amount={payment.get('amount')}, status={payment.get('status')}")
             
@@ -526,44 +528,74 @@ async def update_payment_status(user_id: int, amount: float, new_status: str, ad
                 print(f"⚠️ Не удалось преобразовать amount в float: {payment_amount}")
                 continue
             
-            # Проверяем совпадение всех условий
-            if (payment_user_id == str(user_id) and 
-                abs(payment_amount_float - float(amount)) < 0.01 and  # Используем приближенное сравнение для float
-                payment_status.lower() == 'pending'):
-                
+            # УЛУЧШЕННАЯ ПРОВЕРКА СОВПАДЕНИЯ
+            user_id_match = payment_user_id == str(user_id)
+            # Сравниваем как точно, так и приближенно
+            amount_exact_match = payment_amount_float == float(amount)
+            amount_approx_match = abs(payment_amount_float - float(amount)) < 0.01
+            status_match = payment_status.lower() == 'pending'
+            
+            if user_id_match and (amount_exact_match or amount_approx_match) and status_match:
+                found_payment_row = i
                 print(f"✅ Найден платеж для обновления в строке {i}")
+                print(f"   - User ID: {payment_user_id} == {user_id}")
+                print(f"   - Amount: {payment_amount_float} ~= {amount}")
+                print(f"   - Status: {payment_status}")
+                break
+        
+        if found_payment_row is None:
+            print(f"❌ Платеж не найден для пользователя {user_id} на сумму {amount} со статусом pending")
+            
+            # ДОПОЛНИТЕЛЬНЫЙ ПОИСК - ищем последний платеж пользователя
+            print("🔍 Ищем последний платеж пользователя...")
+            user_payments = []
+            for i, payment in enumerate(payments, start=2):
+                if str(payment.get('telegram_id')) == str(user_id):
+                    user_payments.append((i, payment))
+            
+            if user_payments:
+                print(f"🔍 Найдено {len(user_payments)} платежей пользователя:")
+                for row_num, payment in user_payments[-3:]:  # Показываем последние 3
+                    print(f"   Строка {row_num}: Amount={payment.get('amount')}, Status={payment.get('status')}, Time={payment.get('timestamp')}")
                 
-                # Обновляем статус и данные подтверждения
-                try:
-                    # Колонка 6 - status (считаем от 1)
-                    payments_sheet.update_cell(i, 6, new_status)
-                    print(f"✅ Обновили статус в ячейке ({i}, 6)")
+                # Попробуем найти по более мягким критериям
+                for row_num, payment in reversed(user_payments):  # Идем с конца
+                    payment_amount = payment.get('amount', '')
+                    payment_status = str(payment.get('status', ''))
                     
-                    # Колонка 9 - confirmed_by
-                    payments_sheet.update_cell(i, 9, str(admin_id))
-                    print(f"✅ Обновили confirmed_by в ячейке ({i}, 9)")
-                    
-                    # Колонка 10 - confirmation_date
-                    confirmation_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    payments_sheet.update_cell(i, 10, confirmation_date)
-                    print(f"✅ Обновили confirmation_date в ячейке ({i}, 10)")
-                    
-                    print(f"✅ Статус платежа успешно обновлен: {new_status} для пользователя {user_id}")
-                    return True
-                    
-                except Exception as update_error:
-                    print(f"❌ Ошибка при обновлении ячеек: {update_error}")
-                    return False
+                    try:
+                        payment_amount_float = float(payment_amount)
+                        if abs(payment_amount_float - float(amount)) < 0.01 and payment_status.lower() in ['pending', '']:
+                            found_payment_row = row_num
+                            print(f"✅ Найден платеж по мягким критериям в строке {row_num}")
+                            break
+                    except:
+                        continue
+            
+            if found_payment_row is None:
+                return False
         
-        print(f"❌ Платеж не найден для пользователя {user_id} на сумму {amount} со статусом pending")
-        
-        # Выводим отладочную информацию
-        print("🔍 Все платежи пользователя:")
-        for payment in payments:
-            if str(payment.get('telegram_id')) == str(user_id):
-                print(f"   - Amount: {payment.get('amount')}, Status: {payment.get('status')}")
-        
-        return False
+        # Обновляем найденный платеж
+        try:
+            # Колонка 6 - status (считаем от 1)
+            payments_sheet.update_cell(found_payment_row, 6, new_status)
+            print(f"✅ Обновили статус в ячейке ({found_payment_row}, 6)")
+            
+            # Колонка 9 - confirmed_by
+            payments_sheet.update_cell(found_payment_row, 9, str(admin_id))
+            print(f"✅ Обновили confirmed_by в ячейке ({found_payment_row}, 9)")
+            
+            # Колонка 10 - confirmation_date
+            confirmation_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            payments_sheet.update_cell(found_payment_row, 10, confirmation_date)
+            print(f"✅ Обновили confirmation_date в ячейке ({found_payment_row}, 10)")
+            
+            print(f"✅ Статус платежа успешно обновлен: {new_status} для пользователя {user_id}")
+            return True
+            
+        except Exception as update_error:
+            print(f"❌ Ошибка при обновлении ячеек: {update_error}")
+            return False
         
     except Exception as e:
         print(f"❌ Ошибка обновления статуса платежа: {e}")
@@ -581,8 +613,9 @@ async def send_payment_confirmation_to_admin(user_id: int, amount: float, photo_
         
         payment_type = "💳 Перевод" if photo_file_id else "💵 Наличные"
         
-        # Создаем callback_data с правильным форматом (убираем дробную часть если она .0)
-        amount_str = f"{amount:g}"  # Убирает .0 если число целое
+        # ИСПРАВЛЕННОЕ СОЗДАНИЕ CALLBACK_DATA
+        # Убираем проблемы с float и делаем более надежное форматирование
+        amount_str = str(int(amount)) if amount == int(amount) else str(amount)
         
         # Создаем кнопки для подтверждения/отклонения  
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -603,7 +636,7 @@ async def send_payment_confirmation_to_admin(user_id: int, amount: float, photo_
         message_text = (
             f"💳 **НОВЫЙ ПЛАТЕЖ**\n\n"
             f"👤 **Клиент:** {user['name']}\n"
-            f"💰 **Сумма:** {amount} сом\n"
+            f"💰 **Сумма:** {amount_str} сом\n"
             f"💳 **Тип:** {payment_type}\n"
             f"🆔 **ID:** `{user_id}`\n"
             f"📅 **Время:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -629,7 +662,7 @@ async def send_payment_confirmation_to_admin(user_id: int, amount: float, photo_
                 parse_mode="Markdown"
             )
         
-        print(f"✅ Уведомление админу отправлено для платежа {amount} сом от пользователя {user_id}")
+        print(f"✅ Уведомление админу отправлено для платежа {amount_str} сом от пользователя {user_id}")
         
     except Exception as e:
         print(f"❌ Ошибка отправки уведомления админу: {e}")
@@ -1374,7 +1407,99 @@ async def admin_stats(message: Message):
     except Exception as e:
         print(f"Ошибка получения статистики: {e}")
         await message.answer("❌ Ошибка при получении статистики")
-
+# Обработчик кнопки "📋 Проверить платежи"
+@router.message(F.text == "📋 Проверить платежи")
+async def check_pending_payments(message: Message):
+    """Проверить платежи в ожидании подтверждения"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Доступно только администратору")
+        return
+    
+    if payments_sheet is None:
+        await message.answer("❌ Google Sheets недоступны")
+        return
+    
+    try:
+        await message.answer("🔍 Проверяю платежи...")
+        
+        payments = payments_sheet.get_all_records()
+        pending = [p for p in payments if str(p.get('status', '')).lower() == 'pending']
+        
+        if not pending:
+            await message.answer("✅ Нет платежей, ожидающих подтверждения")
+            return
+        
+        # Формируем сообщение с платежами
+        text = f"📋 **ПЛАТЕЖИ В ОЖИДАНИИ** ({len(pending)})\n\n"
+        
+        # Показываем последние 10 платежей
+        for i, p in enumerate(pending[-10:], 1):
+            user_name = p.get('name', 'Без имени')
+            amount = p.get('amount', 'Не указано')
+            user_id = p.get('telegram_id', 'Не указан')
+            timestamp = p.get('timestamp', 'Не указано')
+            payment_type = p.get('payment_type', 'Не указан')
+            
+            text += f"**{i}.** {user_name}\n"
+            text += f"💰 {amount} сом\n"
+            text += f"💳 {payment_type}\n"
+            text += f"🆔 `{user_id}`\n"
+            text += f"📅 {timestamp}\n"
+            
+            # Создаем кнопки для каждого платежа
+            if str(amount).replace('.', '').replace(',', '').isdigit():
+                try:
+                    amount_float = float(str(amount).replace(',', '.'))
+                    amount_str = str(int(amount_float)) if amount_float == int(amount_float) else str(amount_float)
+                    
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text=f"✅ Подтвердить {amount_str} сом", 
+                                callback_data=f"confirm_payment_{user_id}_{amount_str}"
+                            ),
+                            InlineKeyboardButton(
+                                text=f"❌ Отклонить {amount_str} сом", 
+                                callback_data=f"reject_payment_{user_id}_{amount_str}"
+                            )
+                        ]
+                    ])
+                    
+                    # Отправляем каждый платеж отдельным сообщением с кнопками
+                    payment_text = f"**Платеж #{i}**\n\n" + f"👤 {user_name}\n💰 {amount} сом\n🆔 `{user_id}`\n📅 {timestamp}"
+                    
+                    await message.answer(payment_text, reply_markup=keyboard, parse_mode="Markdown")
+                    
+                except Exception as button_error:
+                    print(f"❌ Ошибка создания кнопок для платежа: {button_error}")
+                    continue
+            
+            text += "\n" + "─" * 30 + "\n\n"
+        
+        # Общая сводка
+        if len(pending) > 10:
+            summary_text = f"📊 **СВОДКА**\n\n"
+            summary_text += f"Всего платежей в ожидании: **{len(pending)}**\n"
+            summary_text += f"Показано последних: **{min(10, len(pending))}**\n\n"
+            summary_text += f"💡 Для подтверждения используйте кнопки выше"
+            
+            await message.answer(summary_text, parse_mode="Markdown")
+        
+    except Exception as e:
+        print(f"❌ Ошибка проверки платежей: {e}")
+        await message.answer(f"❌ Ошибка при проверке платежей: {str(e)[:200]}")
+        
+        # Отправляем отладочную информацию админу
+        try:
+            debug_text = f"🔍 **ОТЛАДКА**\n\n"
+            debug_text += f"Ошибка: `{str(e)}`\n"
+            debug_text += f"Тип ошибки: `{type(e).__name__}`\n"
+            debug_text += f"Google Sheets: {'✅' if payments_sheet else '❌'}"
+            
+            await message.answer(debug_text, parse_mode="Markdown")
+        except:
+            pass
+            
 @router.message(F.text == "🏠 Главное меню")
 async def menu_main(message: Message):
     user = UserManager.get_user(message.from_user.id)
@@ -1551,26 +1676,31 @@ async def close_settings_callback(callback: CallbackQuery):
     await callback.message.answer("⚙️ Настройки закрыты")
     await callback.answer()
 
-# НОВЫЕ ОБРАБОТЧИКИ ПОДТВЕРЖДЕНИЯ ПЛАТЕЖЕЙ
-
 @router.callback_query(F.data.startswith("confirm_payment_"))
 async def confirm_payment_callback(callback: CallbackQuery):
     """Подтверждение платежа администратором"""
     try:
         print(f"🔍 Получен callback: {callback.data}")
         
-        # Парсим данные из callback_data
-        parts = callback.data.split("_")
-        if len(parts) < 4:
+        # УЛУЧШЕННЫЙ ПАРСИНГ ДАННЫХ
+        callback_parts = callback.data.split("_")
+        if len(callback_parts) < 4:
             print(f"❌ Неверный формат callback_data: {callback.data}")
             await callback.answer("❌ Ошибка формата данных")
             return
-            
+        
+        # Собираем amount из всех частей после третьего элемента
+        # Это нужно на случай, если в amount есть точка (она может разделить строку)
+        amount_parts = callback_parts[3:]
+        amount_str = "_".join(amount_parts)
+        
         try:
-            user_id = int(parts[2])
-            amount = float(parts[3])
+            user_id = int(callback_parts[2])
+            amount = float(amount_str)
         except (ValueError, IndexError) as e:
             print(f"❌ Ошибка парсинга данных: {e}")
+            print(f"   callback_parts: {callback_parts}")
+            print(f"   amount_str: {amount_str}")
             await callback.answer("❌ Ошибка данных платежа")
             return
         
@@ -1648,16 +1778,19 @@ async def reject_payment_callback(callback: CallbackQuery):
     try:
         print(f"🔍 Получен callback отклонения: {callback.data}")
         
-        # Парсим данные из callback_data
-        parts = callback.data.split("_")
-        if len(parts) < 4:
+        # УЛУЧШЕННЫЙ ПАРСИНГ (как в confirm_payment)
+        callback_parts = callback.data.split("_")
+        if len(callback_parts) < 4:
             print(f"❌ Неверный формат callback_data: {callback.data}")
             await callback.answer("❌ Ошибка формата данных")
             return
             
+        amount_parts = callback_parts[3:]
+        amount_str = "_".join(amount_parts)
+        
         try:
-            user_id = int(parts[2])
-            amount = float(parts[3])
+            user_id = int(callback_parts[2])
+            amount = float(amount_str)
         except (ValueError, IndexError) as e:
             print(f"❌ Ошибка парсинга данных: {e}")
             await callback.answer("❌ Ошибка данных платежа")
