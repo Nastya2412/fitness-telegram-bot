@@ -15,6 +15,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
+from aiohttp import web
 
 print("📦 Импорты загружены успешно")
 
@@ -30,7 +31,7 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")  # Для Render.com
 
 # Настройки оплаты
-PAYMENT_PHONE = "+996 555 123 456"  # Замените на ваш номер телефона
+PAYMENT_PHONE = "+996995311919"  # Замените на ваш номер телефона
 QR_CODE_PATH = "qr_code.jpg"        # Путь к QR коду в репозитории
 
 print(f"🔑 BOT_TOKEN: {'✅ Загружен' if BOT_TOKEN else '❌ Отсутствует'}")
@@ -1909,8 +1910,110 @@ async def handle_unknown_text(message: Message, state: FSMContext):
             )
         else:
             await message.answer("👋 Привет! Для начала работы нажмите /start")
+async def health_check(request):
+    """Healthcheck endpoint для поддержания активности"""
+    try:
+        # Проверяем статус бота
+        bot_info = await bot.get_me()
+        
+        status_data = {
+            "status": "ok",
+            "timestamp": datetime.now().isoformat(),
+            "bot_username": bot_info.username,
+            "bot_id": bot_info.id,
+            "uptime": "active",
+            "google_sheets": "connected" if users_sheet else "disconnected",
+            "admin_id": ADMIN_ID,
+            "payment_phone": PAYMENT_PHONE
+        }
+        
+        return web.json_response(status_data)
+        
+    except Exception as e:
+        return web.json_response({
+            "status": "error",
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e)
+        }, status=500)
 
-# Запуск бота (адаптированный для Render.com)
+async def root_handler(request):
+    """Корневой маршрут"""
+    return web.json_response({
+        "message": "🏋️ Fitness Bot is running!",
+        "timestamp": datetime.now().isoformat(),
+        "admin_id": ADMIN_ID,
+        "endpoints": {
+            "health": "/health",
+            "status": "/status"
+        }
+    })
+
+async def status_handler(request):
+    """Детальный статус бота"""
+    try:
+        if users_sheet and payments_sheet:
+            # Получаем статистику
+            users = users_sheet.get_all_records()
+            payments = payments_sheet.get_all_records()
+            
+            total_users = len(users)
+            active_users = len([u for u in users if u.get('status') == 'active'])
+            pending_payments = len([p for p in payments if p.get('status') == 'pending'])
+            
+            return web.json_response({
+                "status": "ok",
+                "timestamp": datetime.now().isoformat(),
+                "statistics": {
+                    "total_users": total_users,
+                    "active_users": active_users,
+                    "pending_payments": pending_payments
+                },
+                "google_sheets": "connected"
+            })
+        else:
+            return web.json_response({
+                "status": "limited",
+                "timestamp": datetime.now().isoformat(),
+                "google_sheets": "disconnected",
+                "message": "Working in limited mode"
+            })
+            
+    except Exception as e:
+        return web.json_response({
+            "status": "error",
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e)
+        }, status=500)
+
+async def start_web_server():
+    """Запуск веб-сервера для healthcheck"""
+    try:
+        app = web.Application()
+        
+        # Добавляем маршруты
+        app.router.add_get('/', root_handler)
+        app.router.add_get('/health', health_check)
+        app.router.add_get('/status', status_handler)
+        
+        # Запускаем сервер
+        runner = web.AppRunner(app)
+        await runner.setup()
+        
+        # Render предоставляет PORT через переменную окружения
+        port = int(os.getenv('PORT', 8000))
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        
+        print(f"🌐 Веб-сервер запущен на порту {port}")
+        print(f"🔗 Healthcheck: :{port}/health")
+        print(f"🔗 Status: :{port}/status")
+        
+        return app
+        
+    except Exception as e:
+        print(f"❌ Ошибка запуска веб-сервера: {e}")
+        return None
+        
 async def main():
     """Основная функция запуска бота"""
     try:
@@ -1918,6 +2021,10 @@ async def main():
         print(f"🔑 Токен: {BOT_TOKEN[:10]}...")
         print(f"👨‍💼 Админ ID: {ADMIN_ID}")
         print(f"🌐 Платформа: {'Render.com' if GOOGLE_CREDENTIALS_JSON else 'Локальная разработка'}")
+        
+        # 🌐 ЗАПУСКАЕМ ВЕБ-СЕРВЕР ДЛЯ АКТИВНОСТИ 24/7
+        print("🌐 Запуск веб-сервера для поддержания активности...")
+        web_app = await start_web_server()
         
         # Инициализируем Google Services
         if not init_google_services():
@@ -1938,6 +2045,8 @@ async def main():
         # Уведомляем админа о запуске
         try:
             platform_info = "🌐 Render.com (бесплатно)" if GOOGLE_CREDENTIALS_JSON else "💻 Локальная разработка"
+            port = int(os.getenv('PORT', 8000))
+            
             await bot.send_message(
                 ADMIN_ID,
                 f"🚀 БОТ ЗАПУЩЕН!\n\n"
@@ -1945,6 +2054,9 @@ async def main():
                 f"⚙️ Google Sheets: {'✅ Подключены' if users_sheet else '❌ Недоступны'}\n"
                 f"🏗️ Платформа: {platform_info}\n"
                 f"💳 Платежи: ✅ QR код + подтверждения\n"
+                f"🌐 Веб-сервер: ✅ Порт {port}\n"
+                f"🔗 Healthcheck: /health\n"
+                f"⏰ Статус: Активен 24/7\n"
                 f"🕐 Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
         except Exception as e:
@@ -1954,8 +2066,11 @@ async def main():
         print("📱 Напишите боту /start для начала работы")
         print(f"👨‍💼 Админ-панель доступна по ID: {ADMIN_ID}")
         print("💳 Система оплаты с QR кодом и подтверждениями активна!")
+        print(f"🌐 Healthcheck: :{os.getenv('PORT', 8000)}/health")
+        print("⏰ Веб-сервер предотвращает 'засыпание' на Render.com")
         print("🔄 Бот автоматически перезапускается при ошибках")
         
+        # Запускаем polling бота
         await dp.start_polling(bot)
         
     except Exception as e:
