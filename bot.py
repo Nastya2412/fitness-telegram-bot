@@ -25,14 +25,21 @@ print("🔧 .env файл загружен")
 # Настройки из переменных окружения (поддержка и локальной разработки, и Render)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else None
-GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")  # Добавить эту строку!
+GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")  # Для Render.com (исправленное название)
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")  # Для Render.com
+
+# Настройки оплаты
+PAYMENT_PHONE = "+996 555 123 456"  # Замените на ваш номер телефона
+QR_CODE_PATH = "qr_code.jpg"        # Путь к QR коду в репозитории
 
 print(f"🔑 BOT_TOKEN: {'✅ Загружен' if BOT_TOKEN else '❌ Отсутствует'}")
 print(f"👨‍💼 ADMIN_ID: {'✅ ' + str(ADMIN_ID) if ADMIN_ID else '❌ Отсутствует'}")
-print(f"📊 GOOGLE_CREDENTIALS: {'✅ Переменная окружения' if GOOGLE_CREDENTIALS_JSON else '❌ Отсутствует'}")
+print(f"📊 GOOGLE_CREDENTIALS_FILE: {'✅ ' + str(GOOGLE_CREDENTIALS_FILE) if GOOGLE_CREDENTIALS_FILE else '❌ Отсутствует'}")
+print(f"📊 GOOGLE_CREDENTIALS_JSON: {'✅ Переменная окружения' if GOOGLE_CREDENTIALS_JSON else '❌ Отсутствует'}")
 print(f"📋 SPREADSHEET_ID: {'✅ Загружен' if SPREADSHEET_ID else '❌ Отсутствует'}")
+print(f"💳 PAYMENT_PHONE: {PAYMENT_PHONE}")
+print(f"📷 QR_CODE_PATH: {'✅ ' + QR_CODE_PATH if os.path.exists(QR_CODE_PATH) else '❌ Файл не найден'}")
 
 # Проверяем обязательные переменные
 if not BOT_TOKEN:
@@ -65,6 +72,7 @@ class AdminStates(StatesGroup):
     editing_free_days = State()
     editing_sick_days = State()
     editing_schedule_text = State()
+    editing_rules_text = State()
 
 # Глобальные переменные для Google Sheets
 sheets_client = None
@@ -82,7 +90,39 @@ DEFAULT_SETTINGS = {
     'sessions_per_month': 10,
     'free_days_limit': 7,
     'sick_days_limit': 3,
-    'gym_schedule': 'Пн-Ср-Пт: 7:00-12:00 (группа)\nВт-Чт-Сб: по записи'
+    'gym_schedule': 'Пн-Ср-Пт: 7:00-12:00 (группа)\nВт-Чт-Сб: по записи',
+    'gym_rules': '''📋 ПРАВИЛА ФИТНЕС-ЗАЛА
+
+💰 ОПЛАТА:
+• Месячный абонемент: 8000 сом за 10 занятий
+• Минимальная сумма: 1000 сом
+• Максимальная сумма: 20000 сом
+• Оплата: переводом (со скриншотом) или наличными
+
+⏰ ГРАФИК РАБОТЫ:
+Пн-Ср-Пт: 7:00-12:00 (группа)
+Вт-Чт-Сб: по записи
+
+❄️ ЗАМОРОЗКА АБОНЕМЕНТА:
+• Без причины: до 7 занятий подряд
+• По болезни: до 3 занятий подряд (с отметкой в боте)
+• Заморозка не переносится на следующий период
+• Обязательно уведомлять о болезни через бота
+
+✅ ПОСЕЩЕНИЕ:
+• Приходить строго по расписанию или по записи
+• Отмечать болезнь в боте обязательно
+• За 10 занятий бот присылает напоминание об оплате
+
+❌ ОТМЕНА ЗАНЯТИЙ:
+• Отмена менее чем за 2 часа = занятие сгорает
+• При отсутствии без предупреждения = занятие засчитывается
+
+📱 ИСПОЛЬЗОВАНИЕ БОТА:
+• /payment - отправить оплату
+• /sick - отметить болезнь  
+• /profile - посмотреть статус
+• Все действия требуют подтверждения администратора'''
 }
 
 def init_google_services():
@@ -382,6 +422,7 @@ def get_admin_menu():
         keyboard=[
             [KeyboardButton(text="⚙️ Настройки бота")],
             [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="📝 Правила")],
+            [KeyboardButton(text="✏️ Изменить правила")],
             [KeyboardButton(text="🏠 Главное меню")]
         ],
         resize_keyboard=True,
@@ -425,6 +466,124 @@ async def save_payment_to_sheets(telegram_id, amount, payment_type="transfer", s
     except Exception as e:
         print(f"Ошибка сохранения платежа: {e}")
         return False
+
+async def update_payment_status(user_id: int, amount: float, new_status: str, admin_id: int):
+    """Обновить статус платежа в Google Sheets"""
+    try:
+        if payments_sheet is None:
+            print("❌ payments_sheet не инициализирован")
+            return False
+        
+        # Находим последний платеж пользователя с указанной суммой
+        payments = payments_sheet.get_all_records()
+        
+        for i, payment in enumerate(reversed(payments), 1):
+            if (str(payment.get('telegram_id')) == str(user_id) and 
+                float(payment.get('amount', 0)) == amount and 
+                payment.get('status') == 'pending'):
+                
+                row_index = len(payments) - i + 2  # +2 для заголовка и индексации с 1
+                
+                # Обновляем статус и данные подтверждения
+                payments_sheet.update_cell(row_index, 6, new_status)  # Колонка status
+                payments_sheet.update_cell(row_index, 9, admin_id)    # Колонка confirmed_by
+                payments_sheet.update_cell(row_index, 10, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))  # confirmation_date
+                
+                print(f"Статус платежа обновлен: {new_status} для пользователя {user_id}")
+                return True
+        
+        print(f"Платеж не найден для пользователя {user_id} на сумму {amount}")
+        return False
+        
+    except Exception as e:
+        print(f"Ошибка обновления статуса платежа: {e}")
+        return False
+
+async def send_payment_confirmation_to_admin(user_id: int, amount: float, photo_file_id: str = None):
+    """Отправить админу уведомление о платеже с кнопками подтверждения"""
+    try:
+        user = UserManager.get_user(user_id)
+        if not user:
+            print(f"Пользователь {user_id} не найден")
+            return
+        
+        payment_type = "💳 Перевод" if photo_file_id else "💵 Наличные"
+        
+        # Создаем кнопки для подтверждения/отклонения
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить", 
+                    callback_data=f"confirm_payment_{user_id}_{amount}"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отклонить", 
+                    callback_data=f"reject_payment_{user_id}_{amount}"
+                )
+            ]
+        ])
+        
+        message_text = (
+            f"💳 **НОВЫЙ ПЛАТЕЖ**\n\n"
+            f"👤 **Клиент:** {user['name']}\n"
+            f"💰 **Сумма:** {amount} сом\n"
+            f"💳 **Тип:** {payment_type}\n"
+            f"🆔 **ID:** `{user_id}`\n"
+            f"📅 **Время:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"❓ **Подтвердить платеж?**"
+        )
+        
+        # Отправляем уведомление
+        if photo_file_id:
+            # Если есть скриншот - отправляем с фото
+            await bot.send_photo(
+                ADMIN_ID,
+                photo=photo_file_id,
+                caption=message_text,
+                reply_markup=keyboard,
+                parse_mode="Markdown"
+            )
+        else:
+            # Если наличные - просто текст
+            await bot.send_message(
+                ADMIN_ID,
+                message_text,
+                reply_markup=keyboard,
+                parse_mode="Markdown"
+            )
+        
+    except Exception as e:
+        print(f"Ошибка отправки уведомления админу: {e}")
+
+async def save_and_notify_cash_payment(user_id: int, amount: float, state: FSMContext):
+    """Сохранить наличную оплату и уведомить админа"""
+    try:
+        success = await save_payment_to_sheets(
+            telegram_id=user_id,
+            amount=amount,
+            payment_type="cash",
+            status="pending"
+        )
+        
+        if success:
+            await bot.send_message(
+                user_id,
+                f"✅ **Наличная оплата зарегистрирована!**\n\n"
+                f"💰 Сумма: **{amount} сом**\n"
+                f"💵 Тип: Наличные\n"
+                f"⏳ Ожидайте подтверждения администратора",
+                parse_mode="Markdown"
+            )
+            
+            # Уведомление админу
+            await send_payment_confirmation_to_admin(user_id, amount)
+        else:
+            await bot.send_message(user_id, "❌ Ошибка при сохранении платежа. Попробуйте еще раз.")
+        
+        await state.clear()
+        
+    except Exception as e:
+        print(f"Ошибка сохранения наличной оплаты: {e}")
 
 async def notify_admin_on_error(error_text: str):
     """Уведомить админа об ошибке"""
@@ -697,15 +856,20 @@ async def cmd_rules(message: Message):
     """Команда /rules - показать правила"""
     print(f"🔍 Команда /rules от пользователя {message.from_user.id}")
     
-    min_payment = SettingsManager.get_setting('min_payment', DEFAULT_SETTINGS['min_payment'])
-    max_payment = SettingsManager.get_setting('max_payment', DEFAULT_SETTINGS['max_payment'])
-    monthly_price = SettingsManager.get_setting('monthly_price', DEFAULT_SETTINGS['monthly_price'])
-    sessions_count = SettingsManager.get_setting('sessions_per_month', DEFAULT_SETTINGS['sessions_per_month'])
-    free_days = SettingsManager.get_setting('free_days_limit', DEFAULT_SETTINGS['free_days_limit'])
-    sick_days = SettingsManager.get_setting('sick_days_limit', DEFAULT_SETTINGS['sick_days_limit'])
-    gym_schedule = SettingsManager.get_setting('gym_schedule', DEFAULT_SETTINGS['gym_schedule'])
+    # Получаем правила из настроек Google Sheets
+    rules_text = SettingsManager.get_setting('gym_rules', DEFAULT_SETTINGS['gym_rules'])
     
-    rules_text = f"""📋 ПРАВИЛА ФИТНЕС-ЗАЛА
+    # Если правила из настроек пустые, используем шаблон с актуальными настройками
+    if not rules_text or rules_text == DEFAULT_SETTINGS['gym_rules']:
+        min_payment = SettingsManager.get_setting('min_payment', DEFAULT_SETTINGS['min_payment'])
+        max_payment = SettingsManager.get_setting('max_payment', DEFAULT_SETTINGS['max_payment'])
+        monthly_price = SettingsManager.get_setting('monthly_price', DEFAULT_SETTINGS['monthly_price'])
+        sessions_count = SettingsManager.get_setting('sessions_per_month', DEFAULT_SETTINGS['sessions_per_month'])
+        free_days = SettingsManager.get_setting('free_days_limit', DEFAULT_SETTINGS['free_days_limit'])
+        sick_days = SettingsManager.get_setting('sick_days_limit', DEFAULT_SETTINGS['sick_days_limit'])
+        gym_schedule = SettingsManager.get_setting('gym_schedule', DEFAULT_SETTINGS['gym_schedule'])
+        
+        rules_text = f"""📋 ПРАВИЛА ФИТНЕС-ЗАЛА
 
 💰 ОПЛАТА:
 • Месячный абонемент: {monthly_price} сом за {sessions_count} занятий
@@ -783,11 +947,12 @@ async def cmd_edit_limits(message: Message):
         [InlineKeyboardButton(text=f"❄️ Дней заморозки: {free_days}", callback_data="edit_free_days")],
         [InlineKeyboardButton(text=f"🤒 Дней по болезни: {sick_days}", callback_data="edit_sick_days")],
         [InlineKeyboardButton(text="📅 Изменить расписание", callback_data="edit_schedule")],
+        [InlineKeyboardButton(text="✏️ Изменить правила", callback_data="edit_rules")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="close_settings")]
     ])
     
     await message.answer(
-        "⏰ Настройки лимитов и расписания\n\n"
+        "⏰ Настройки лимитов и контента\n\n"
         "Выберите параметр для изменения:",
         reply_markup=keyboard
     )
@@ -809,7 +974,8 @@ async def handle_edit_settings(callback: CallbackQuery, state: FSMContext):
         "sessions_count": ("🏋️ Введите количество занятий в абонементе:", AdminStates.editing_sessions_count),
         "free_days": ("❄️ Введите количество дней заморозки:", AdminStates.editing_free_days),
         "sick_days": ("🤒 Введите количество дней по болезни:", AdminStates.editing_sick_days),
-        "schedule": ("📅 Введите новое расписание зала:", AdminStates.editing_schedule_text)
+        "schedule": ("📅 Введите новое расписание зала:", AdminStates.editing_schedule_text),
+        "rules": ("✏️ Введите новые правила зала:", AdminStates.editing_rules_text)
     }
     
     if setting_type in settings_map:
@@ -944,6 +1110,32 @@ async def process_schedule_text(message: Message, state: FSMContext):
     
     await state.clear()
 
+@router.message(AdminStates.editing_rules_text)
+async def process_rules_text(message: Message, state: FSMContext):
+    """Обработка изменения правил зала"""
+    new_rules = message.text.strip()
+    if not new_rules:
+        await message.answer("❌ Правила не могут быть пустыми")
+        return
+    
+    if len(new_rules) > 4000:
+        await message.answer("❌ Текст правил слишком длинный (максимум 4000 символов)")
+        return
+    
+    if SettingsManager.update_setting('gym_rules', new_rules):
+        await message.answer(
+            f"✅ **Правила зала успешно обновлены!**\n\n"
+            f"📝 Новые правила:\n\n{new_rules}",
+            parse_mode="Markdown"
+        )
+        
+        # Уведомляем, что правила обновлены
+        print(f"✅ Правила зала обновлены администратором {message.from_user.id}")
+    else:
+        await message.answer("❌ Ошибка при сохранении правил")
+    
+    await state.clear()
+
 # Обработчики кнопок меню
 @router.message(F.text == "💳 Отправить платеж")
 async def menu_payment(message: Message, state: FSMContext):
@@ -1001,6 +1193,27 @@ async def admin_settings(message: Message):
 async def admin_rules(message: Message):
     """Показать правила"""
     await cmd_rules(message)
+
+@router.message(F.text == "✏️ Изменить правила")
+async def admin_edit_rules(message: Message, state: FSMContext):
+    """Изменить правила зала (только админ)"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Доступно только администратору")
+        return
+    
+    # Получаем текущие правила
+    current_rules = SettingsManager.get_setting('gym_rules', DEFAULT_SETTINGS['gym_rules'])
+    
+    await message.answer(
+        f"✏️ **РЕДАКТИРОВАНИЕ ПРАВИЛ ЗАЛА**\n\n"
+        f"📝 Текущие правила:\n"
+        f"```\n{current_rules[:500]}{'...' if len(current_rules) > 500 else ''}\n```\n\n"
+        f"💬 Введите новый текст правил:\n"
+        f"_(Можете использовать эмодзи, переносы строк и форматирование)_",
+        parse_mode="Markdown"
+    )
+    
+    await state.set_state(AdminStates.editing_rules_text)
 
 @router.message(F.text == "📊 Статистика")
 async def admin_stats(message: Message):
@@ -1064,12 +1277,54 @@ async def menu_main(message: Message):
     else:
         await message.answer("❌ Сначала пройдите регистрацию командой /start")
 
-# Обработчик callback-ов
+# НОВЫЕ ОБРАБОТЧИКИ ПЛАТЕЖЕЙ
+
 @router.callback_query(F.data == "payment_transfer")
 async def payment_transfer_selected(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("💰 Введите сумму оплаты (например: 8000):")
-    await state.update_data(payment_type="transfer")
-    await state.set_state(PaymentStates.waiting_for_amount)
+    """Обработка выбора безналичной оплаты с QR кодом из репозитория"""
+    try:
+        # Отправляем QR код из файла репозитория
+        if os.path.exists(QR_CODE_PATH):
+            with open(QR_CODE_PATH, 'rb') as photo:
+                await callback.message.answer_photo(
+                    photo=photo,
+                    caption=f"💳 **Безналичная оплата**\n\n"
+                            f"📱 **По номеру телефона:**\n"
+                            f"`{PAYMENT_PHONE}`\n\n"
+                            f"📋 **Инструкция:**\n"
+                            f"1️⃣ Отсканируйте QR код или переведите по номеру\n"
+                            f"2️⃣ Укажите сумму перевода\n"
+                            f"3️⃣ Пришлите скриншот чека\n\n"
+                            f"💰 Введите сумму оплаты:",
+                    parse_mode="Markdown"
+                )
+        else:
+            # Если файл QR кода не найден
+            await callback.message.answer(
+                f"💳 **Безналичная оплата**\n\n"
+                f"📱 **По номеру телефона:**\n"
+                f"`{PAYMENT_PHONE}`\n\n"
+                f"📋 **Инструкция:**\n"
+                f"1️⃣ Переведите деньги по указанному номеру\n"
+                f"2️⃣ Укажите сумму перевода\n"
+                f"3️⃣ Пришлите скриншот чека\n\n"
+                f"💰 Введите сумму оплаты:",
+                parse_mode="Markdown"
+            )
+        
+        await state.update_data(payment_type="transfer")
+        await state.set_state(PaymentStates.waiting_for_amount)
+        
+    except Exception as e:
+        print(f"Ошибка отправки QR кода: {e}")
+        await callback.message.answer(
+            f"💳 Безналичная оплата\n\n"
+            f"📱 По номеру телефона: {PAYMENT_PHONE}\n\n"
+            f"💰 Введите сумму оплаты:"
+        )
+        await state.update_data(payment_type="transfer")
+        await state.set_state(PaymentStates.waiting_for_amount)
+    
     await callback.answer()
 
 @router.callback_query(F.data == "payment_cash")
@@ -1126,6 +1381,102 @@ async def close_settings_callback(callback: CallbackQuery):
     """Закрыть настройки"""
     await callback.message.answer("⚙️ Настройки закрыты")
     await callback.answer()
+
+# НОВЫЕ ОБРАБОТЧИКИ ПОДТВЕРЖДЕНИЯ ПЛАТЕЖЕЙ
+
+@router.callback_query(F.data.startswith("confirm_payment_"))
+async def confirm_payment_callback(callback: CallbackQuery):
+    """Подтверждение платежа администратором"""
+    try:
+        # Парсим данные из callback_data
+        parts = callback.data.split("_")
+        user_id = int(parts[2])
+        amount = float(parts[3])
+        
+        user = UserManager.get_user(user_id)
+        if not user:
+            await callback.answer("❌ Пользователь не найден")
+            return
+        
+        # Обновляем статус платежа в Google Sheets
+        success = await update_payment_status(user_id, amount, "confirmed", callback.from_user.id)
+        
+        if success:
+            # Уведомляем клиента
+            await bot.send_message(
+                user_id,
+                f"✅ **Ваш платеж подтвержден!**\n\n"
+                f"💰 Сумма: **{amount} сом**\n"
+                f"👨‍💼 Подтверждено администратором\n"
+                f"📅 Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"🎉 Спасибо за оплату!",
+                parse_mode="Markdown"
+            )
+            
+            # Обновляем сообщение админа
+            await callback.message.edit_caption(
+                caption=f"✅ **ПЛАТЕЖ ПОДТВЕРЖДЕН**\n\n"
+                        f"👤 **Клиент:** {user['name']}\n"
+                        f"💰 **Сумма:** {amount} сом\n"
+                        f"🆔 **ID:** `{user_id}`\n"
+                        f"📅 **Подтверждено:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                parse_mode="Markdown"
+            )
+            
+            await callback.answer("✅ Платеж подтвержден!")
+        else:
+            await callback.answer("❌ Ошибка при обновлении статуса")
+            
+    except Exception as e:
+        print(f"Ошибка подтверждения платежа: {e}")
+        await callback.answer("❌ Ошибка при подтверждении")
+
+@router.callback_query(F.data.startswith("reject_payment_"))
+async def reject_payment_callback(callback: CallbackQuery):
+    """Отклонение платежа администратором"""
+    try:
+        # Парсим данные из callback_data
+        parts = callback.data.split("_")
+        user_id = int(parts[2])
+        amount = float(parts[3])
+        
+        user = UserManager.get_user(user_id)
+        if not user:
+            await callback.answer("❌ Пользователь не найден")
+            return
+        
+        # Обновляем статус платежа в Google Sheets
+        success = await update_payment_status(user_id, amount, "rejected", callback.from_user.id)
+        
+        if success:
+            # Уведомляем клиента
+            await bot.send_message(
+                user_id,
+                f"❌ **Ваш платеж отклонен**\n\n"
+                f"💰 Сумма: **{amount} сом**\n"
+                f"👨‍💼 Отклонено администратором\n"
+                f"📅 Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"📞 Свяжитесь с администратором для уточнения",
+                parse_mode="Markdown"
+            )
+            
+            # Обновляем сообщение админа
+            await callback.message.edit_caption(
+                caption=f"❌ **ПЛАТЕЖ ОТКЛОНЕН**\n\n"
+                        f"👤 **Клиент:** {user['name']}\n"
+                        f"💰 **Сумма:** {amount} сом\n"
+                        f"🆔 **ID:** `{user_id}`\n"
+                        f"📅 **Отклонено:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                parse_mode="Markdown"
+            )
+            
+            await callback.answer("❌ Платеж отклонен!")
+        else:
+            await callback.answer("❌ Ошибка при обновлении статуса")
+            
+    except Exception as e:
+        print(f"Ошибка отклонения платежа: {e}")
+        await callback.answer("❌ Ошибка при отклонении")
 
 # Обработчик состояний регистрации
 @router.message(RegistrationStates.waiting_for_name)
@@ -1198,7 +1549,8 @@ async def process_registration_schedule(message: Message, state: FSMContext):
     
     await state.clear()
 
-# Обработчик состояний платежа
+# НОВЫЕ ОБРАБОТЧИКИ СОСТОЯНИЙ ПЛАТЕЖА
+
 @router.message(PaymentStates.waiting_for_amount)
 async def process_payment_amount(message: Message, state: FSMContext):
     try:
@@ -1220,45 +1572,73 @@ async def process_payment_amount(message: Message, state: FSMContext):
             await message.answer(f"❌ Максимальная сумма: {max_payment} сом. Свяжитесь с администратором.")
             return
         
+        await state.update_data(amount=amount)
         data = await state.get_data()
         payment_type = data.get('payment_type', 'transfer')
         
-        success = await save_payment_to_sheets(
-            telegram_id=message.from_user.id,
-            amount=amount,
-            payment_type=payment_type,
-            status="pending"
-        )
-        
-        if success:
+        if payment_type == 'transfer':
             await message.answer(
-                f"✅ Платеж принят!\n"
-                f"💰 Сумма: {amount} сом\n"
-                f"💳 Тип: {'Перевод' if payment_type == 'transfer' else 'Наличные'}\n"
-                f"⏳ Ожидайте подтверждения администратора."
+                f"📸 **Отлично!** Теперь пришлите скриншот перевода на сумму **{amount} сом**\n\n"
+                f"💡 Прикрепите фото чека или скриншот из приложения банка\n"
+                f"📱 После получения скриншота администратор подтвердит платеж",
+                parse_mode="Markdown"
             )
-            
-            # Уведомление админу
-            user = UserManager.get_user(message.from_user.id)
-            if user:
-                await bot.send_message(
-                    ADMIN_ID,
-                    f"💳 Новый платеж!\n\n"
-                    f"👤 {user['name']}\n"
-                    f"💰 Сумма: {amount} сом\n"
-                    f"💳 Тип: {'Перевод' if payment_type == 'transfer' else 'Наличные'}\n"
-                    f"👤 ID: {message.from_user.id}"
-                )
+            await state.set_state(PaymentStates.waiting_for_screenshot)
         else:
-            await message.answer("❌ Ошибка при сохранении платежа. Попробуйте еще раз.")
-        
-        await state.clear()
+            # Для наличных сразу сохраняем
+            await save_and_notify_cash_payment(message.from_user.id, amount, state)
         
     except ValueError:
         await message.answer("❌ Введите корректную сумму (только цифры). Например: 8000")
     except Exception as e:
         print(f"Ошибка обработки суммы: {e}")
         await message.answer("❌ Произошла ошибка. Попробуйте еще раз.")
+
+@router.message(PaymentStates.waiting_for_screenshot, F.photo)
+async def process_payment_screenshot(message: Message, state: FSMContext):
+    """Обработка скриншота платежа"""
+    try:
+        data = await state.get_data()
+        amount = data.get('amount')
+        photo_file_id = message.photo[-1].file_id  # Берем фото в максимальном качестве
+        
+        # Сохраняем платеж со скриншотом
+        success = await save_payment_to_sheets(
+            telegram_id=message.from_user.id,
+            amount=amount,
+            payment_type="transfer",
+            status="pending",
+            photo_file_id=photo_file_id
+        )
+        
+        if success:
+            await message.answer(
+                f"✅ **Платеж принят!**\n\n"
+                f"💰 Сумма: **{amount} сом**\n"
+                f"📸 Скриншот получен\n"
+                f"⏳ Ожидайте подтверждения администратора\n\n"
+                f"📝 Уведомление отправлено администратору",
+                parse_mode="Markdown"
+            )
+            
+            # Уведомление админу с кнопками подтверждения
+            await send_payment_confirmation_to_admin(message.from_user.id, amount, photo_file_id)
+        else:
+            await message.answer("❌ Ошибка при сохранении платежа. Попробуйте еще раз.")
+        
+        await state.clear()
+        
+    except Exception as e:
+        print(f"Ошибка обработки скриншота: {e}")
+        await message.answer("❌ Произошла ошибка. Попробуйте еще раз.")
+
+@router.message(PaymentStates.waiting_for_screenshot)
+async def process_payment_no_photo(message: Message, state: FSMContext):
+    await message.answer(
+        "📸 **Пожалуйста, пришлите именно фото скриншота перевода**\n\n"
+        "💡 Нажмите на скрепку (📎) и выберите 'Фото'",
+        parse_mode="Markdown"
+    )
 
 # ВАЖНО: Обработчик неизвестных сообщений должен быть ПОСЛЕДНИМ!
 @router.message(F.text)
@@ -1324,6 +1704,7 @@ async def main():
                 f"📱 Все команды работают\n"
                 f"⚙️ Google Sheets: {'✅ Подключены' if users_sheet else '❌ Недоступны'}\n"
                 f"🏗️ Платформа: {platform_info}\n"
+                f"💳 Платежи: ✅ QR код + подтверждения\n"
                 f"🕐 Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
         except Exception as e:
@@ -1332,6 +1713,7 @@ async def main():
         print("\n🎉 Бот успешно запущен!")
         print("📱 Напишите боту /start для начала работы")
         print(f"👨‍💼 Админ-панель доступна по ID: {ADMIN_ID}")
+        print("💳 Система оплаты с QR кодом и подтверждениями активна!")
         print("🔄 Бот автоматически перезапускается при ошибках")
         
         await dp.start_polling(bot)
