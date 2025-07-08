@@ -4,7 +4,8 @@ google-auth==2.25.2
 google-api-python-client==2.112.0
 python-dotenv==1.0.0
 requests==2.31.0
-aiohttp>=3.8.0
-certifi
-charset-normalizer
-urllib3
+
+# Принудительно используем pre-compiled версии
+cryptography>=3.4.8
+cffi>=1.15.0
+pycparser>=2.20
