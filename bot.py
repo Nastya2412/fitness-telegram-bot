@@ -1431,6 +1431,8 @@ async def admin_stats(message: Message):
         print(f"Ошибка получения статистики: {e}")
         await message.answer("❌ Ошибка при получении статистики")
 # Обработчик кнопки "📋 Проверить платежи"
+# ОБНОВИТЕ ФУНКЦИЮ check_pending_payments:
+
 @router.message(F.text == "📋 Проверить платежи")
 async def check_pending_payments(message: Message):
     """Проверить платежи в ожидании подтверждения"""
@@ -1446,14 +1448,14 @@ async def check_pending_payments(message: Message):
         await message.answer("🔍 Проверяю платежи...")
         
         payments = payments_sheet.get_all_records()
-        pending = [p for p in payments if str(p.get('status', '')).lower() == 'pending']
+        # ИСПРАВЛЯЕМ ПОИСК PENDING ПЛАТЕЖЕЙ
+        pending = [p for p in payments if str(p.get('status', '')).lower() in ['pending', 'cash', 'transfer']]
         
         if not pending:
             await message.answer("✅ Нет платежей, ожидающих подтверждения")
             return
         
-        # Формируем сообщение с платежами
-        text = f"📋 **ПЛАТЕЖИ В ОЖИДАНИИ** ({len(pending)})\n\n"
+        await message.answer(f"📋 **НАЙДЕНО {len(pending)} ПЛАТЕЖЕЙ В ОЖИДАНИИ**\n\n💡 Отправляю каждый платеж с кнопками...", parse_mode="Markdown")
         
         # Показываем последние 10 платежей
         for i, p in enumerate(pending[-10:], 1):
@@ -1463,48 +1465,69 @@ async def check_pending_payments(message: Message):
             timestamp = p.get('timestamp', 'Не указано')
             payment_type = p.get('payment_type', 'Не указан')
             
-            text += f"**{i}.** {user_name}\n"
-            text += f"💰 {amount} сом\n"
-            text += f"💳 {payment_type}\n"
-            text += f"🆔 `{user_id}`\n"
-            text += f"📅 {timestamp}\n"
-            
-            # Создаем кнопки для каждого платежа
-            if str(amount).replace('.', '').replace(',', '').isdigit():
-                try:
-                    amount_float = float(str(amount).replace(',', '.'))
-                    amount_str = str(int(amount_float)) if amount_float == int(amount_float) else str(amount_float)
-                    
-                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text=f"✅ Подтвердить {amount_str} сом", 
-                                callback_data=f"confirm_payment_{user_id}_{amount_str}"
-                            ),
-                            InlineKeyboardButton(
-                                text=f"❌ Отклонить {amount_str} сом", 
-                                callback_data=f"reject_payment_{user_id}_{amount_str}"
-                            )
-                        ]
-                    ])
-                    
-                    # Отправляем каждый платеж отдельным сообщением с кнопками
-                    payment_text = f"**Платеж #{i}**\n\n" + f"👤 {user_name}\n💰 {amount} сом\n🆔 `{user_id}`\n📅 {timestamp}"
-                    
-                    await message.answer(payment_text, reply_markup=keyboard, parse_mode="Markdown")
-                    
-                except Exception as button_error:
-                    print(f"❌ Ошибка создания кнопок для платежа: {button_error}")
-                    continue
-            
-            text += "\n" + "─" * 30 + "\n\n"
+            # ИСПРАВЛЯЕМ ОБРАБОТКУ AMOUNT с пробелами
+            try:
+                if isinstance(amount, str):
+                    amount_cleaned = str(amount).replace(' ', '').replace(',', '.')
+                    amount_float = float(amount_cleaned)
+                else:
+                    amount_float = float(amount)
+                
+                amount_str = str(int(amount_float)) if amount_float == int(amount_float) else str(amount_float)
+                
+                # ИСПОЛЬЗУЕМ НОВЫЕ КОРОТКИЕ CALLBACK_DATA
+                confirm_callback = f"pay_ok_{user_id}_{amount_str}"
+                reject_callback = f"pay_no_{user_id}_{amount_str}"
+                
+                print(f"🔍 Создаем кнопки для платежа #{i}:")
+                print(f"   Подтвердить: {confirm_callback} (длина: {len(confirm_callback)})")
+                print(f"   Отклонить: {reject_callback} (длина: {len(reject_callback)})")
+                
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=f"✅ Подтвердить", 
+                            callback_data=confirm_callback
+                        ),
+                        InlineKeyboardButton(
+                            text=f"❌ Отклонить", 
+                            callback_data=reject_callback
+                        )
+                    ]
+                ])
+                
+                # Отправляем каждый платеж отдельным сообщением с кнопками
+                payment_text = (
+                    f"**💳 Платеж #{i}**\n\n"
+                    f"👤 **Клиент:** {user_name}\n"
+                    f"💰 **Сумма:** {amount} сом\n"
+                    f"💳 **Тип:** {payment_type}\n"
+                    f"🆔 **ID:** `{user_id}`\n"
+                    f"📅 **Время:** {timestamp}\n\n"
+                    f"❓ **Подтвердить платеж?**"
+                )
+                
+                await message.answer(payment_text, reply_markup=keyboard, parse_mode="Markdown")
+                
+            except Exception as button_error:
+                print(f"❌ Ошибка создания кнопок для платежа: {button_error}")
+                # Отправляем без кнопок
+                payment_text = (
+                    f"**💳 Платеж #{i} (БЕЗ КНОПОК)**\n\n"
+                    f"👤 **Клиент:** {user_name}\n"
+                    f"💰 **Сумма:** {amount} сом\n"
+                    f"🆔 **ID:** `{user_id}`\n"
+                    f"⚠️ Ошибка: {str(button_error)[:100]}"
+                )
+                await message.answer(payment_text, parse_mode="Markdown")
+                continue
         
         # Общая сводка
         if len(pending) > 10:
             summary_text = f"📊 **СВОДКА**\n\n"
             summary_text += f"Всего платежей в ожидании: **{len(pending)}**\n"
             summary_text += f"Показано последних: **{min(10, len(pending))}**\n\n"
-            summary_text += f"💡 Для подтверждения используйте кнопки выше"
+            summary_text += f"💡 Используйте кнопки выше для подтверждения"
             
             await message.answer(summary_text, parse_mode="Markdown")
         
