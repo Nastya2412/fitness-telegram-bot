@@ -475,11 +475,14 @@ async def save_payment_to_sheets(telegram_id, amount, payment_type="transfer", s
         
         current_sessions = UserManager.get_user_sessions_count(telegram_id)
         
+        # ИСПРАВЛЯЕМ СОХРАНЕНИЕ СУММЫ - убираем пробелы и форматируем как число
+        amount_clean = float(amount) if amount else 0
+        
         payment_row = [
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             user['name'],
             telegram_id,
-            amount or "Не указано",
+            amount_clean,  # Сохраняем как число, а не строку с пробелами
             payment_type,
             status,
             photo_file_id or "",
@@ -491,11 +494,11 @@ async def save_payment_to_sheets(telegram_id, amount, payment_type="transfer", s
         ]
         payments_sheet.append_row(payment_row)
         
-        print(f"Платеж сохранен в Google Sheets для {user['name']}")
+        print(f"✅ Платеж сохранен в Google Sheets для {user['name']}: {amount_clean} сом")
         return True
         
     except Exception as e:
-        print(f"Ошибка сохранения платежа: {e}")
+        print(f"❌ Ошибка сохранения платежа: {e}")
         return False
 
 async def update_payment_status(user_id: int, amount: float, new_status: str, admin_id: int):
@@ -521,9 +524,12 @@ async def update_payment_status(user_id: int, amount: float, new_status: str, ad
             payment_amount = payment.get('amount', '')
             payment_status = str(payment.get('status', ''))
             
-            # Преобразуем amount к float для сравнения
+            # ИСПРАВЛЕННОЕ ПРЕОБРАЗОВАНИЕ AMOUNT К FLOAT
             try:
-                payment_amount_float = float(payment_amount)
+                # Удаляем пробелы и заменяем запятую на точку
+                amount_cleaned = str(payment_amount).replace(' ', '').replace(',', '.')
+                payment_amount_float = float(amount_cleaned)
+                print(f"✅ Успешно преобразовали '{payment_amount}' -> {payment_amount_float}")
             except (ValueError, TypeError):
                 print(f"⚠️ Не удалось преобразовать amount в float: {payment_amount}")
                 continue
@@ -533,7 +539,13 @@ async def update_payment_status(user_id: int, amount: float, new_status: str, ad
             # Сравниваем как точно, так и приближенно
             amount_exact_match = payment_amount_float == float(amount)
             amount_approx_match = abs(payment_amount_float - float(amount)) < 0.01
-            status_match = payment_status.lower() == 'pending'
+            # ИСПРАВЛЯЕМ ПРОВЕРКУ СТАТУСА - ищем и pending и другие статусы
+            status_match = payment_status.lower() in ['pending', 'cash', 'transfer']
+            
+            print(f"🔍 Проверка совпадений:")
+            print(f"   - User ID: {payment_user_id} == {user_id} -> {user_id_match}")
+            print(f"   - Amount: {payment_amount_float} ~= {amount} -> {amount_exact_match or amount_approx_match}")
+            print(f"   - Status: {payment_status} in [pending, cash, transfer] -> {status_match}")
             
             if user_id_match and (amount_exact_match or amount_approx_match) and status_match:
                 found_payment_row = i
@@ -544,7 +556,7 @@ async def update_payment_status(user_id: int, amount: float, new_status: str, ad
                 break
         
         if found_payment_row is None:
-            print(f"❌ Платеж не найден для пользователя {user_id} на сумму {amount} со статусом pending")
+            print(f"❌ Платеж не найден для пользователя {user_id} на сумму {amount}")
             
             # ДОПОЛНИТЕЛЬНЫЙ ПОИСК - ищем последний платеж пользователя
             print("🔍 Ищем последний платеж пользователя...")
@@ -564,10 +576,16 @@ async def update_payment_status(user_id: int, amount: float, new_status: str, ad
                     payment_status = str(payment.get('status', ''))
                     
                     try:
-                        payment_amount_float = float(payment_amount)
-                        if abs(payment_amount_float - float(amount)) < 0.01 and payment_status.lower() in ['pending', '']:
+                        # ИСПРАВЛЕННОЕ ПРЕОБРАЗОВАНИЕ для поиска по мягким критериям
+                        amount_cleaned = str(payment_amount).replace(' ', '').replace(',', '.')
+                        payment_amount_float = float(amount_cleaned)
+                        
+                        # Ищем любой платеж с нужной суммой, независимо от статуса
+                        if abs(payment_amount_float - float(amount)) < 0.01:
                             found_payment_row = row_num
                             print(f"✅ Найден платеж по мягким критериям в строке {row_num}")
+                            print(f"   Amount: {payment_amount} -> {payment_amount_float}")
+                            print(f"   Status: {payment_status}")
                             break
                     except:
                         continue
@@ -579,7 +597,7 @@ async def update_payment_status(user_id: int, amount: float, new_status: str, ad
         try:
             # Колонка 6 - status (считаем от 1)
             payments_sheet.update_cell(found_payment_row, 6, new_status)
-            print(f"✅ Обновили статус в ячейке ({found_payment_row}, 6)")
+            print(f"✅ Обновили статус в ячейке ({found_payment_row}, 6) на '{new_status}'")
             
             # Колонка 9 - confirmed_by
             payments_sheet.update_cell(found_payment_row, 9, str(admin_id))
@@ -613,25 +631,30 @@ async def send_payment_confirmation_to_admin(user_id: int, amount: float, photo_
         
         payment_type = "💳 Перевод" if photo_file_id else "💵 Наличные"
         
-        # ИСПРАВЛЕННОЕ СОЗДАНИЕ CALLBACK_DATA
-        # Убираем проблемы с float и делаем более надежное форматирование
+        # ИСПРАВЛЯЕМ СОЗДАНИЕ CALLBACK_DATA - делаем короче
         amount_str = str(int(amount)) if amount == int(amount) else str(amount)
+        
+        # УКОРАЧИВАЕМ CALLBACK_DATA чтобы избежать обрезания
+        confirm_callback = f"pay_ok_{user_id}_{amount_str}"
+        reject_callback = f"pay_no_{user_id}_{amount_str}"
+        
+        print(f"🔍 Создаем кнопки с callback_data:")
+        print(f"   Подтвердить: {confirm_callback} (длина: {len(confirm_callback)})")
+        print(f"   Отклонить: {reject_callback} (длина: {len(reject_callback)})")
         
         # Создаем кнопки для подтверждения/отклонения  
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="✅ Подтвердить", 
-                    callback_data=f"confirm_payment_{user_id}_{amount_str}"
+                    callback_data=confirm_callback
                 ),
                 InlineKeyboardButton(
                     text="❌ Отклонить", 
-                    callback_data=f"reject_payment_{user_id}_{amount_str}"
+                    callback_data=reject_callback
                 )
             ]
         ])
-        
-        print(f"🔍 Создаем кнопки с callback_data: confirm_payment_{user_id}_{amount_str}")
         
         message_text = (
             f"💳 **НОВЫЙ ПЛАТЕЖ**\n\n"
@@ -1676,31 +1699,24 @@ async def close_settings_callback(callback: CallbackQuery):
     await callback.message.answer("⚙️ Настройки закрыты")
     await callback.answer()
 
-@router.callback_query(F.data.startswith("confirm_payment_"))
+@router.callback_query(F.data.startswith("pay_ok_"))
 async def confirm_payment_callback(callback: CallbackQuery):
     """Подтверждение платежа администратором"""
     try:
         print(f"🔍 Получен callback: {callback.data}")
         
-        # УЛУЧШЕННЫЙ ПАРСИНГ ДАННЫХ
+        # ПАРСИНГ НОВЫХ КОРОТКИХ CALLBACK_DATA
         callback_parts = callback.data.split("_")
         if len(callback_parts) < 4:
             print(f"❌ Неверный формат callback_data: {callback.data}")
             await callback.answer("❌ Ошибка формата данных")
             return
         
-        # Собираем amount из всех частей после третьего элемента
-        # Это нужно на случай, если в amount есть точка (она может разделить строку)
-        amount_parts = callback_parts[3:]
-        amount_str = "_".join(amount_parts)
-        
         try:
             user_id = int(callback_parts[2])
-            amount = float(amount_str)
+            amount = float(callback_parts[3])
         except (ValueError, IndexError) as e:
             print(f"❌ Ошибка парсинга данных: {e}")
-            print(f"   callback_parts: {callback_parts}")
-            print(f"   amount_str: {amount_str}")
             await callback.answer("❌ Ошибка данных платежа")
             return
         
@@ -1772,25 +1788,22 @@ async def confirm_payment_callback(callback: CallbackQuery):
         traceback.print_exc()
         await callback.answer("❌ Критическая ошибка")
 
-@router.callback_query(F.data.startswith("reject_payment_"))
+@router.callback_query(F.data.startswith("pay_no_"))
 async def reject_payment_callback(callback: CallbackQuery):
     """Отклонение платежа администратором"""
     try:
         print(f"🔍 Получен callback отклонения: {callback.data}")
         
-        # УЛУЧШЕННЫЙ ПАРСИНГ (как в confirm_payment)
+        # ПАРСИНГ НОВЫХ КОРОТКИХ CALLBACK_DATA
         callback_parts = callback.data.split("_")
         if len(callback_parts) < 4:
             print(f"❌ Неверный формат callback_data: {callback.data}")
             await callback.answer("❌ Ошибка формата данных")
             return
             
-        amount_parts = callback_parts[3:]
-        amount_str = "_".join(amount_parts)
-        
         try:
             user_id = int(callback_parts[2])
-            amount = float(amount_str)
+            amount = float(callback_parts[3])
         except (ValueError, IndexError) as e:
             print(f"❌ Ошибка парсинга данных: {e}")
             await callback.answer("❌ Ошибка данных платежа")
