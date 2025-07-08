@@ -27,10 +27,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else None
 GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")  # Для Render.com
 
 # Настройки оплаты
-PAYMENT_PHONE = "+996995311919"  # Замените на ваш номер телефона
+PAYMENT_PHONE = "+996 555 123 456"  # Замените на ваш номер телефона
 QR_CODE_PATH = "qr_code.jpg"        # Путь к QR коду в репозитории
 
 print(f"🔑 BOT_TOKEN: {'✅ Загружен' if BOT_TOKEN else '❌ Отсутствует'}")
@@ -39,7 +39,10 @@ print(f"📊 GOOGLE_CREDENTIALS_FILE: {'✅ ' + str(GOOGLE_CREDENTIALS_FILE) if 
 print(f"📊 GOOGLE_CREDENTIALS_JSON: {'✅ Переменная окружения' if GOOGLE_CREDENTIALS_JSON else '❌ Отсутствует'}")
 print(f"📋 SPREADSHEET_ID: {'✅ Загружен' if SPREADSHEET_ID else '❌ Отсутствует'}")
 print(f"💳 PAYMENT_PHONE: {PAYMENT_PHONE}")
-print(f"📷 QR_CODE_PATH: {'✅ ' + QR_CODE_PATH if os.path.exists(QR_CODE_PATH) else '❌ Файл не найден'}")
+print(f"📷 QR_CODE_PATH: {QR_CODE_PATH}")
+print(f"📷 QR код статус: {'✅ Найден' if os.path.exists(QR_CODE_PATH) else '❌ Файл не найден'}")
+if os.path.exists(QR_CODE_PATH):
+    print(f"📷 QR код размер: {os.path.getsize(QR_CODE_PATH)} байт")
 
 # Проверяем обязательные переменные
 if not BOT_TOKEN:
@@ -367,6 +370,32 @@ class UserManager:
             return False
     
     @staticmethod
+    def update_user_status(telegram_id, new_status):
+        """Обновить статус пользователя в Google Sheets"""
+        try:
+            if users_sheet is None:
+                print("❌ users_sheet не инициализирован")
+                return False
+            
+            # Получаем все записи пользователей
+            users = users_sheet.get_all_records()
+            
+            # Ищем пользователя для обновления
+            for i, user in enumerate(users, start=2):  # start=2 потому что строка 1 - заголовки
+                if str(user.get('telegram_id')) == str(telegram_id):
+                    # Обновляем статус (колонка 12 - "status")
+                    users_sheet.update_cell(i, 12, new_status)
+                    print(f"✅ Статус пользователя {telegram_id} обновлен на '{new_status}'")
+                    return True
+            
+            print(f"❌ Пользователь {telegram_id} не найден для обновления статуса")
+            return False
+            
+        except Exception as e:
+            print(f"❌ Ошибка обновления статуса пользователя: {e}")
+            return False
+    
+    @staticmethod
     def get_user_sessions_count(telegram_id):
         """Подсчитать занятия пользователя"""
         try:
@@ -474,29 +503,71 @@ async def update_payment_status(user_id: int, amount: float, new_status: str, ad
             print("❌ payments_sheet не инициализирован")
             return False
         
-        # Находим последний платеж пользователя с указанной суммой
-        payments = payments_sheet.get_all_records()
+        print(f"🔍 Ищем платеж: user_id={user_id}, amount={amount}, status=pending")
         
-        for i, payment in enumerate(reversed(payments), 1):
-            if (str(payment.get('telegram_id')) == str(user_id) and 
-                float(payment.get('amount', 0)) == amount and 
-                payment.get('status') == 'pending'):
+        # Получаем все платежи
+        payments = payments_sheet.get_all_records()
+        print(f"🔍 Всего платежей в таблице: {len(payments)}")
+        
+        # Ищем платеж для обновления
+        for i, payment in enumerate(payments, start=2):  # start=2 потому что строка 1 - заголовки
+            print(f"🔍 Проверяем платеж {i-1}: telegram_id={payment.get('telegram_id')}, amount={payment.get('amount')}, status={payment.get('status')}")
+            
+            # Проверяем совпадение (исправляем проблемы с типами данных)
+            payment_user_id = str(payment.get('telegram_id', ''))
+            payment_amount = payment.get('amount', '')
+            payment_status = str(payment.get('status', ''))
+            
+            # Преобразуем amount к float для сравнения
+            try:
+                payment_amount_float = float(payment_amount)
+            except (ValueError, TypeError):
+                print(f"⚠️ Не удалось преобразовать amount в float: {payment_amount}")
+                continue
+            
+            # Проверяем совпадение всех условий
+            if (payment_user_id == str(user_id) and 
+                abs(payment_amount_float - float(amount)) < 0.01 and  # Используем приближенное сравнение для float
+                payment_status.lower() == 'pending'):
                 
-                row_index = len(payments) - i + 2  # +2 для заголовка и индексации с 1
+                print(f"✅ Найден платеж для обновления в строке {i}")
                 
                 # Обновляем статус и данные подтверждения
-                payments_sheet.update_cell(row_index, 6, new_status)  # Колонка status
-                payments_sheet.update_cell(row_index, 9, admin_id)    # Колонка confirmed_by
-                payments_sheet.update_cell(row_index, 10, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))  # confirmation_date
-                
-                print(f"Статус платежа обновлен: {new_status} для пользователя {user_id}")
-                return True
+                try:
+                    # Колонка 6 - status (считаем от 1)
+                    payments_sheet.update_cell(i, 6, new_status)
+                    print(f"✅ Обновили статус в ячейке ({i}, 6)")
+                    
+                    # Колонка 9 - confirmed_by
+                    payments_sheet.update_cell(i, 9, str(admin_id))
+                    print(f"✅ Обновили confirmed_by в ячейке ({i}, 9)")
+                    
+                    # Колонка 10 - confirmation_date
+                    confirmation_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    payments_sheet.update_cell(i, 10, confirmation_date)
+                    print(f"✅ Обновили confirmation_date в ячейке ({i}, 10)")
+                    
+                    print(f"✅ Статус платежа успешно обновлен: {new_status} для пользователя {user_id}")
+                    return True
+                    
+                except Exception as update_error:
+                    print(f"❌ Ошибка при обновлении ячеек: {update_error}")
+                    return False
         
-        print(f"Платеж не найден для пользователя {user_id} на сумму {amount}")
+        print(f"❌ Платеж не найден для пользователя {user_id} на сумму {amount} со статусом pending")
+        
+        # Выводим отладочную информацию
+        print("🔍 Все платежи пользователя:")
+        for payment in payments:
+            if str(payment.get('telegram_id')) == str(user_id):
+                print(f"   - Amount: {payment.get('amount')}, Status: {payment.get('status')}")
+        
         return False
         
     except Exception as e:
-        print(f"Ошибка обновления статуса платежа: {e}")
+        print(f"❌ Ошибка обновления статуса платежа: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 async def send_payment_confirmation_to_admin(user_id: int, amount: float, photo_file_id: str = None):
@@ -509,19 +580,24 @@ async def send_payment_confirmation_to_admin(user_id: int, amount: float, photo_
         
         payment_type = "💳 Перевод" if photo_file_id else "💵 Наличные"
         
-        # Создаем кнопки для подтверждения/отклонения
+        # Создаем callback_data с правильным форматом (убираем дробную часть если она .0)
+        amount_str = f"{amount:g}"  # Убирает .0 если число целое
+        
+        # Создаем кнопки для подтверждения/отклонения  
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="✅ Подтвердить", 
-                    callback_data=f"confirm_payment_{user_id}_{amount}"
+                    callback_data=f"confirm_payment_{user_id}_{amount_str}"
                 ),
                 InlineKeyboardButton(
                     text="❌ Отклонить", 
-                    callback_data=f"reject_payment_{user_id}_{amount}"
+                    callback_data=f"reject_payment_{user_id}_{amount_str}"
                 )
             ]
         ])
+        
+        print(f"🔍 Создаем кнопки с callback_data: confirm_payment_{user_id}_{amount_str}")
         
         message_text = (
             f"💳 **НОВЫЙ ПЛАТЕЖ**\n\n"
@@ -552,8 +628,12 @@ async def send_payment_confirmation_to_admin(user_id: int, amount: float, photo_
                 parse_mode="Markdown"
             )
         
+        print(f"✅ Уведомление админу отправлено для платежа {amount} сом от пользователя {user_id}")
+        
     except Exception as e:
-        print(f"Ошибка отправки уведомления админу: {e}")
+        print(f"❌ Ошибка отправки уведомления админу: {e}")
+        import traceback
+        traceback.print_exc()
 
 async def save_and_notify_cash_payment(user_id: int, amount: float, state: FSMContext):
     """Сохранить наличную оплату и уведомить админа"""
@@ -647,20 +727,54 @@ async def cmd_start(message: Message, state: FSMContext):
         print(f"🔍 Пользователь найден: {user is not None}")
         
         if user:
-            if user_id == ADMIN_ID:
-                print(f"🔍 Администратор входит в систему")
-                await message.answer(
-                    f"👨‍💼 Добро пожаловать, Администратор!\n\n"
-                    "Выберите действие:",
-                    reply_markup=get_admin_menu()
-                )
+            current_status = user.get('status', 'active')
+            print(f"🔍 Текущий статус пользователя: {current_status}")
+            
+            # Если пользователь неактивный, активируем его
+            if current_status == 'inactive' or current_status == 'неактивный':
+                print(f"🔄 Активируем неактивного пользователя {user_id}")
+                success = UserManager.update_user_status(user_id, 'active')
+                
+                if success:
+                    # Уведомляем админа о возвращении
+                    try:
+                        await bot.send_message(
+                            ADMIN_ID,
+                            f"🔄 {user['name']} вернулся в программу!\n"
+                            f"👤 ID: {user_id}\n"
+                            f"📅 Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                    except Exception as notify_error:
+                        print(f"❌ Ошибка уведомления админа о возвращении: {notify_error}")
+                    
+                    await message.answer(
+                        f"🎉 С возвращением, {user['name']}! 👋\n\n"
+                        f"✅ Ваш статус снова активен!\n"
+                        f"Продолжайте пользоваться ботом:",
+                        reply_markup=get_main_menu()
+                    )
+                else:
+                    await message.answer(
+                        f"Привет, {user['name']}! 👋\n\n"
+                        f"⚠️ Не удалось обновить статус, но вы можете пользоваться ботом:",
+                        reply_markup=get_main_menu()
+                    )
             else:
-                print(f"🔍 Обычный пользователь: {user.get('name', 'Без имени')}")
-                await message.answer(
-                    f"Привет, {user['name']}! 👋\n\n"
-                    "Выберите действие из меню ниже:",
-                    reply_markup=get_main_menu()
-                )
+                # Обычный вход активного пользователя
+                if user_id == ADMIN_ID:
+                    print(f"🔍 Администратор входит в систему")
+                    await message.answer(
+                        f"👨‍💼 Добро пожаловать, Администратор!\n\n"
+                        "Выберите действие:",
+                        reply_markup=get_admin_menu()
+                    )
+                else:
+                    print(f"🔍 Обычный пользователь: {user.get('name', 'Без имени')}")
+                    await message.answer(
+                        f"Привет, {user['name']}! 👋\n\n"
+                        "Выберите действие из меню ниже:",
+                        reply_markup=get_main_menu()
+                    )
         else:
             print(f"🔍 Новый пользователь, начинаем регистрацию")
             await message.answer(
@@ -1283,23 +1397,60 @@ async def menu_main(message: Message):
 async def payment_transfer_selected(callback: CallbackQuery, state: FSMContext):
     """Обработка выбора безналичной оплаты с QR кодом из репозитория"""
     try:
-        # Отправляем QR код из файла репозитория
+        print(f"🔍 Пытаемся отправить QR код...")
+        print(f"🔍 Текущая директория: {os.getcwd()}")
+        print(f"🔍 Список файлов: {os.listdir('.')}")
+        print(f"🔍 Проверяем файл QR_CODE_PATH: {QR_CODE_PATH}")
+        print(f"🔍 Файл существует: {os.path.exists(QR_CODE_PATH)}")
+        
         if os.path.exists(QR_CODE_PATH):
-            with open(QR_CODE_PATH, 'rb') as photo:
-                await callback.message.answer_photo(
-                    photo=photo,
-                    caption=f"💳 **Безналичная оплата**\n\n"
-                            f"📱 **По номеру телефона:**\n"
-                            f"`{PAYMENT_PHONE}`\n\n"
-                            f"📋 **Инструкция:**\n"
-                            f"1️⃣ Отсканируйте QR код или переведите по номеру\n"
-                            f"2️⃣ Укажите сумму перевода\n"
-                            f"3️⃣ Пришлите скриншот чека\n\n"
-                            f"💰 Введите сумму оплаты:",
+            try:
+                # Проверяем размер файла
+                file_size = os.path.getsize(QR_CODE_PATH)
+                print(f"🔍 Размер файла QR кода: {file_size} байт")
+                
+                if file_size == 0:
+                    print("❌ Файл QR кода пустой!")
+                    raise Exception("QR код файл пустой")
+                
+                # Проверяем права доступа
+                if not os.access(QR_CODE_PATH, os.R_OK):
+                    print("❌ Нет прав на чтение файла QR кода!")
+                    raise Exception("Нет прав на чтение QR кода")
+                
+                with open(QR_CODE_PATH, 'rb') as photo:
+                    print("✅ Отправляем QR код...")
+                    await callback.message.answer_photo(
+                        photo=photo,
+                        caption=f"💳 **Безналичная оплата**\n\n"
+                                f"📱 **По номеру телефона:**\n"
+                                f"`{PAYMENT_PHONE}`\n\n"
+                                f"📋 **Инструкция:**\n"
+                                f"1️⃣ Отсканируйте QR код или переведите по номеру\n"
+                                f"2️⃣ Укажите сумму перевода\n"
+                                f"3️⃣ Пришлите скриншот чека\n\n"
+                                f"💰 Введите сумму оплаты:",
+                        parse_mode="Markdown"
+                    )
+                    print("✅ QR код успешно отправлен!")
+            except Exception as photo_error:
+                print(f"❌ Ошибка отправки фото: {photo_error}")
+                # Отправляем без фото
+                await callback.message.answer(
+                    f"💳 **Безналичная оплата**\n\n"
+                    f"📱 **По номеру телефона:**\n"
+                    f"`{PAYMENT_PHONE}`\n\n"
+                    f"⚠️ _QR код временно недоступен_\n\n"
+                    f"📋 **Инструкция:**\n"
+                    f"1️⃣ Переведите деньги по указанному номеру\n"
+                    f"2️⃣ Укажите сумму перевода\n"
+                    f"3️⃣ Пришлите скриншот чека\n\n"
+                    f"💰 Введите сумму оплаты:",
                     parse_mode="Markdown"
                 )
         else:
             # Если файл QR кода не найден
+            print(f"❌ Файл QR кода не найден: {QR_CODE_PATH}")
             await callback.message.answer(
                 f"💳 **Безналичная оплата**\n\n"
                 f"📱 **По номеру телефона:**\n"
@@ -1316,7 +1467,7 @@ async def payment_transfer_selected(callback: CallbackQuery, state: FSMContext):
         await state.set_state(PaymentStates.waiting_for_amount)
         
     except Exception as e:
-        print(f"Ошибка отправки QR кода: {e}")
+        print(f"❌ Общая ошибка в payment_transfer_selected: {e}")
         await callback.message.answer(
             f"💳 Безналичная оплата\n\n"
             f"📱 По номеру телефона: {PAYMENT_PHONE}\n\n"
@@ -1345,20 +1496,37 @@ async def confirm_quit_callback(callback: CallbackQuery):
             await callback.message.answer("❌ Пользователь не найден")
             return
         
-        # Здесь можно добавить логику изменения статуса пользователя
-        await callback.message.answer(
-            f"✅ Ваш статус изменен на 'неактивный'.\n\n"
-            f"Если захотите вернуться, напишите /start\n"
-            f"Спасибо, что были с нами! 👋"
-        )
+        # Обновляем статус пользователя на 'inactive' в Google Sheets
+        success = UserManager.update_user_status(user_id, 'inactive')
         
-        # Уведомление админу
-        await bot.send_message(
-            ADMIN_ID,
-            f"❌ {user['name']} покинул программу\n"
-            f"👤 ID: {user_id}\n"
-            f"📅 Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
+        if success:
+            await callback.message.answer(
+                f"✅ Ваш статус изменен на 'неактивный'.\n\n"
+                f"Если захотите вернуться, напишите /start\n"
+                f"Спасибо, что были с нами! 👋"
+            )
+            
+            # Уведомление админу
+            await bot.send_message(
+                ADMIN_ID,
+                f"❌ {user['name']} покинул программу\n"
+                f"👤 ID: {user_id}\n"
+                f"📅 Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"🔄 Статус изменен на 'неактивный'"
+            )
+        else:
+            await callback.message.answer(
+                f"⚠️ Вы покинули программу, но статус не удалось обновить.\n\n"
+                f"Если захотите вернуться, напишите /start\n"
+                f"Спасибо, что были с нами! 👋"
+            )
+            
+            # Уведомление админу об ошибке
+            await bot.send_message(
+                ADMIN_ID,
+                f"⚠️ {user['name']} покинул программу (ID: {user_id})\n"
+                f"❌ Не удалось обновить статус в Google Sheets"
+            )
         
     except Exception as e:
         print(f"Ошибка подтверждения выхода: {e}")
@@ -1388,57 +1556,111 @@ async def close_settings_callback(callback: CallbackQuery):
 async def confirm_payment_callback(callback: CallbackQuery):
     """Подтверждение платежа администратором"""
     try:
+        print(f"🔍 Получен callback: {callback.data}")
+        
         # Парсим данные из callback_data
         parts = callback.data.split("_")
-        user_id = int(parts[2])
-        amount = float(parts[3])
+        if len(parts) < 4:
+            print(f"❌ Неверный формат callback_data: {callback.data}")
+            await callback.answer("❌ Ошибка формата данных")
+            return
+            
+        try:
+            user_id = int(parts[2])
+            amount = float(parts[3])
+        except (ValueError, IndexError) as e:
+            print(f"❌ Ошибка парсинга данных: {e}")
+            await callback.answer("❌ Ошибка данных платежа")
+            return
+        
+        print(f"🔍 Парсинг: user_id={user_id}, amount={amount}")
         
         user = UserManager.get_user(user_id)
         if not user:
+            print(f"❌ Пользователь {user_id} не найден")
             await callback.answer("❌ Пользователь не найден")
             return
+        
+        print(f"🔍 Пользователь найден: {user.get('name', 'Без имени')}")
         
         # Обновляем статус платежа в Google Sheets
         success = await update_payment_status(user_id, amount, "confirmed", callback.from_user.id)
         
         if success:
+            print("✅ Статус успешно обновлен, отправляем уведомления")
+            
             # Уведомляем клиента
-            await bot.send_message(
-                user_id,
-                f"✅ **Ваш платеж подтвержден!**\n\n"
-                f"💰 Сумма: **{amount} сом**\n"
-                f"👨‍💼 Подтверждено администратором\n"
-                f"📅 Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"🎉 Спасибо за оплату!",
-                parse_mode="Markdown"
-            )
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"✅ **Ваш платеж подтвержден!**\n\n"
+                    f"💰 Сумма: **{amount} сом**\n"
+                    f"👨‍💼 Подтверждено администратором\n"
+                    f"📅 Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                    f"🎉 Спасибо за оплату!",
+                    parse_mode="Markdown"
+                )
+                print("✅ Уведомление клиенту отправлено")
+            except Exception as notify_error:
+                print(f"❌ Ошибка отправки уведомления клиенту: {notify_error}")
             
             # Обновляем сообщение админа
-            await callback.message.edit_caption(
-                caption=f"✅ **ПЛАТЕЖ ПОДТВЕРЖДЕН**\n\n"
-                        f"👤 **Клиент:** {user['name']}\n"
-                        f"💰 **Сумма:** {amount} сом\n"
-                        f"🆔 **ID:** `{user_id}`\n"
-                        f"📅 **Подтверждено:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                parse_mode="Markdown"
-            )
+            try:
+                if callback.message.photo:
+                    # Если сообщение с фото
+                    await callback.message.edit_caption(
+                        caption=f"✅ **ПЛАТЕЖ ПОДТВЕРЖДЕН**\n\n"
+                                f"👤 **Клиент:** {user['name']}\n"
+                                f"💰 **Сумма:** {amount} сом\n"
+                                f"🆔 **ID:** `{user_id}`\n"
+                                f"📅 **Подтверждено:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                        parse_mode="Markdown"
+                    )
+                else:
+                    # Если обычное сообщение
+                    await callback.message.edit_text(
+                        text=f"✅ **ПЛАТЕЖ ПОДТВЕРЖДЕН**\n\n"
+                             f"👤 **Клиент:** {user['name']}\n"
+                             f"💰 **Сумма:** {amount} сом\n"
+                             f"🆔 **ID:** `{user_id}`\n"
+                             f"📅 **Подтверждено:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                        parse_mode="Markdown"
+                    )
+                print("✅ Сообщение админа обновлено")
+            except Exception as edit_error:
+                print(f"❌ Ошибка обновления сообщения админа: {edit_error}")
             
             await callback.answer("✅ Платеж подтвержден!")
         else:
+            print("❌ Не удалось обновить статус")
             await callback.answer("❌ Ошибка при обновлении статуса")
             
     except Exception as e:
-        print(f"Ошибка подтверждения платежа: {e}")
-        await callback.answer("❌ Ошибка при подтверждении")
+        print(f"❌ Критическая ошибка подтверждения платежа: {e}")
+        import traceback
+        traceback.print_exc()
+        await callback.answer("❌ Критическая ошибка")
 
 @router.callback_query(F.data.startswith("reject_payment_"))
 async def reject_payment_callback(callback: CallbackQuery):
     """Отклонение платежа администратором"""
     try:
+        print(f"🔍 Получен callback отклонения: {callback.data}")
+        
         # Парсим данные из callback_data
         parts = callback.data.split("_")
-        user_id = int(parts[2])
-        amount = float(parts[3])
+        if len(parts) < 4:
+            print(f"❌ Неверный формат callback_data: {callback.data}")
+            await callback.answer("❌ Ошибка формата данных")
+            return
+            
+        try:
+            user_id = int(parts[2])
+            amount = float(parts[3])
+        except (ValueError, IndexError) as e:
+            print(f"❌ Ошибка парсинга данных: {e}")
+            await callback.answer("❌ Ошибка данных платежа")
+            return
         
         user = UserManager.get_user(user_id)
         if not user:
@@ -1450,32 +1672,50 @@ async def reject_payment_callback(callback: CallbackQuery):
         
         if success:
             # Уведомляем клиента
-            await bot.send_message(
-                user_id,
-                f"❌ **Ваш платеж отклонен**\n\n"
-                f"💰 Сумма: **{amount} сом**\n"
-                f"👨‍💼 Отклонено администратором\n"
-                f"📅 Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"📞 Свяжитесь с администратором для уточнения",
-                parse_mode="Markdown"
-            )
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"❌ **Ваш платеж отклонен**\n\n"
+                    f"💰 Сумма: **{amount} сом**\n"
+                    f"👨‍💼 Отклонено администратором\n"
+                    f"📅 Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                    f"📞 Свяжитесь с администратором для уточнения",
+                    parse_mode="Markdown"
+                )
+            except Exception as notify_error:
+                print(f"❌ Ошибка отправки уведомления клиенту: {notify_error}")
             
             # Обновляем сообщение админа
-            await callback.message.edit_caption(
-                caption=f"❌ **ПЛАТЕЖ ОТКЛОНЕН**\n\n"
-                        f"👤 **Клиент:** {user['name']}\n"
-                        f"💰 **Сумма:** {amount} сом\n"
-                        f"🆔 **ID:** `{user_id}`\n"
-                        f"📅 **Отклонено:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                parse_mode="Markdown"
-            )
+            try:
+                if callback.message.photo:
+                    await callback.message.edit_caption(
+                        caption=f"❌ **ПЛАТЕЖ ОТКЛОНЕН**\n\n"
+                                f"👤 **Клиент:** {user['name']}\n"
+                                f"💰 **Сумма:** {amount} сом\n"
+                                f"🆔 **ID:** `{user_id}`\n"
+                                f"📅 **Отклонено:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await callback.message.edit_text(
+                        text=f"❌ **ПЛАТЕЖ ОТКЛОНЕН**\n\n"
+                             f"👤 **Клиент:** {user['name']}\n"
+                             f"💰 **Сумма:** {amount} сом\n"
+                             f"🆔 **ID:** `{user_id}`\n"
+                             f"📅 **Отклонено:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                        parse_mode="Markdown"
+                    )
+            except Exception as edit_error:
+                print(f"❌ Ошибка обновления сообщения админа: {edit_error}")
             
             await callback.answer("❌ Платеж отклонен!")
         else:
             await callback.answer("❌ Ошибка при обновлении статуса")
             
     except Exception as e:
-        print(f"Ошибка отклонения платежа: {e}")
+        print(f"❌ Ошибка отклонения платежа: {e}")
+        import traceback
+        traceback.print_exc()
         await callback.answer("❌ Ошибка при отклонении")
 
 # Обработчик состояний регистрации
