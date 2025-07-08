@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import re
+import json  # Добавлен для Render.com
 from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
@@ -17,28 +18,30 @@ from dotenv import load_dotenv
 
 print("📦 Импорты загружены успешно")
 
-# Загружаем переменные из .env файла
+# Загружаем переменные из .env файла (для локальной разработки)
 load_dotenv()
 print("🔧 .env файл загружен")
 
-# Настройки из .env файла
+# Настройки из переменных окружения (поддержка и локальной разработки, и Render)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else None
 GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")  # Для Render.com
 
 print(f"🔑 BOT_TOKEN: {'✅ Загружен' if BOT_TOKEN else '❌ Отсутствует'}")
 print(f"👨‍💼 ADMIN_ID: {'✅ ' + str(ADMIN_ID) if ADMIN_ID else '❌ Отсутствует'}")
 print(f"📊 GOOGLE_CREDENTIALS_FILE: {'✅ ' + str(GOOGLE_CREDENTIALS_FILE) if GOOGLE_CREDENTIALS_FILE else '❌ Отсутствует'}")
+print(f"📊 GOOGLE_CREDENTIALS_JSON: {'✅ Переменная окружения' if GOOGLE_CREDENTIALS_JSON else '❌ Отсутствует'}")
 print(f"📋 SPREADSHEET_ID: {'✅ Загружен' if SPREADSHEET_ID else '❌ Отсутствует'}")
 
 # Проверяем обязательные переменные
 if not BOT_TOKEN:
-    print("❌ КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не найден в .env файле!")
+    print("❌ КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не найден в переменных окружения!")
     exit(1)
 
 if not ADMIN_ID:
-    print("❌ КРИТИЧЕСКАЯ ОШИБКА: ADMIN_ID не найден в .env файле!")
+    print("❌ КРИТИЧЕСКАЯ ОШИБКА: ADMIN_ID не найден в переменных окружения!")
     exit(1)
 
 logging.basicConfig(level=logging.INFO)
@@ -84,7 +87,7 @@ DEFAULT_SETTINGS = {
 }
 
 def init_google_services():
-    """Инициализация Google Services"""
+    """Инициализация Google Services (адаптированная для Render.com)"""
     global sheets_client, drive_service, users_sheet, payments_sheet, attendance_sheet, settings_sheet
     
     # Инициализируем переменные как None
@@ -98,20 +101,45 @@ def init_google_services():
     try:
         print("🔄 Инициализация Google Services...")
         
-        # Проверяем наличие файла учетных данных
-        if not GOOGLE_CREDENTIALS_FILE or not os.path.exists(GOOGLE_CREDENTIALS_FILE):
-            print(f"❌ Файл {GOOGLE_CREDENTIALS_FILE} не найден!")
-            print(f"📁 Текущая директория: {os.getcwd()}")
-            return False
-        
         scope = [
             'https://spreadsheets.google.com/feeds',
             'https://www.googleapis.com/auth/drive',
             'https://www.googleapis.com/auth/drive.file'
         ]
         
-        print("🔑 Авторизация...")
-        creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=scope)
+        # Получаем credentials - поддержка и Render, и локальной разработки
+        creds = None
+        
+        if GOOGLE_CREDENTIALS_JSON:
+            print("🔑 Используем credentials из переменной окружения (Render.com)...")
+            try:
+                creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+                creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+                print("✅ JSON credentials успешно загружены")
+            except json.JSONDecodeError as e:
+                print(f"❌ Ошибка парсинга JSON credentials: {e}")
+                return False
+            except Exception as e:
+                print(f"❌ Ошибка создания credentials из JSON: {e}")
+                return False
+                
+        elif GOOGLE_CREDENTIALS_FILE and os.path.exists(GOOGLE_CREDENTIALS_FILE):
+            print("🔑 Используем credentials из файла (локальная разработка)...")
+            try:
+                creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=scope)
+                print("✅ Файл credentials успешно загружен")
+            except Exception as e:
+                print(f"❌ Ошибка загрузки файла credentials: {e}")
+                return False
+        else:
+            print("❌ Google credentials не найдены!")
+            print("💡 Для Render.com: установите переменную GOOGLE_CREDENTIALS_JSON")
+            print("💡 Для локальной разработки: установите GOOGLE_CREDENTIALS_FILE в .env")
+            return False
+        
+        if not creds:
+            print("❌ Не удалось создать credentials")
+            return False
         
         # Инициализация Sheets
         print("📊 Подключение к Google Sheets...")
@@ -122,7 +150,7 @@ def init_google_services():
         drive_service = build('drive', 'v3', credentials=creds)
         
         if not SPREADSHEET_ID:
-            print("❌ SPREADSHEET_ID не указан в .env файле!")
+            print("❌ SPREADSHEET_ID не указан в переменных окружения!")
             return False
             
         print(f"📋 Открытие таблицы ID: {SPREADSHEET_ID}")
@@ -189,9 +217,13 @@ def init_google_services():
         
         if "PERMISSION_DENIED" in str(e):
             print("❌ Ошибка доступа! Проверьте:")
-            print("   1. Правильность ID таблицы в .env")
+            print("   1. Правильность ID таблицы")
             print("   2. Что таблица расшарена для сервисного аккаунта")
             print("   3. Что включены Google Sheets и Drive API")
+        elif "INVALID_ARGUMENT" in str(e):
+            print("❌ Неверные аргументы! Проверьте:")
+            print("   1. Корректность JSON credentials")
+            print("   2. Что JSON не поврежден")
         
         return False
 
@@ -1259,20 +1291,21 @@ async def handle_unknown_text(message: Message, state: FSMContext):
         else:
             await message.answer("👋 Привет! Для начала работы нажмите /start")
 
-# Запуск бота
+# Запуск бота (адаптированный для Render.com)
 async def main():
     """Основная функция запуска бота"""
     try:
-        print("🚀 Запуск фитнес-бота...")
+        print("🚀 Запуск фитнес-бота на Render.com...")
         print(f"🔑 Токен: {BOT_TOKEN[:10]}...")
         print(f"👨‍💼 Админ ID: {ADMIN_ID}")
+        print(f"🌐 Платформа: {'Render.com' if GOOGLE_CREDENTIALS_JSON else 'Локальная разработка'}")
         
-        # Инициализируем Google Services (необязательно для базовой работы)
+        # Инициализируем Google Services
         if not init_google_services():
             print("⚠️ Google Sheets недоступны, работаем в упрощенном режиме")
-            await notify_admin_on_error("Google Sheets недоступны")
+            await notify_admin_on_error("Google Sheets недоступны на Render.com")
         else:
-            print("✅ Google Sheets подключены")
+            print("✅ Google Sheets подключены успешно")
         
         # Устанавливаем команды бота
         print("🔧 Настройка команд бота...")
@@ -1285,11 +1318,13 @@ async def main():
         
         # Уведомляем админа о запуске
         try:
+            platform_info = "🌐 Render.com (бесплатно)" if GOOGLE_CREDENTIALS_JSON else "💻 Локальная разработка"
             await bot.send_message(
                 ADMIN_ID,
                 f"🚀 БОТ ЗАПУЩЕН!\n\n"
                 f"📱 Все команды работают\n"
                 f"⚙️ Google Sheets: {'✅ Подключены' if users_sheet else '❌ Недоступны'}\n"
+                f"🏗️ Платформа: {platform_info}\n"
                 f"🕐 Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
         except Exception as e:
@@ -1298,6 +1333,7 @@ async def main():
         print("\n🎉 Бот успешно запущен!")
         print("📱 Напишите боту /start для начала работы")
         print(f"👨‍💼 Админ-панель доступна по ID: {ADMIN_ID}")
+        print("🔄 Бот автоматически перезапускается при ошибках")
         
         await dp.start_polling(bot)
         
@@ -1312,6 +1348,9 @@ async def main():
             
         import traceback
         traceback.print_exc()
+        
+        # Для Render важно завершить с кодом ошибки
+        exit(1)
     finally:
         try:
             await bot.session.close()
@@ -1327,3 +1366,4 @@ if __name__ == "__main__":
         print(f"💥 Фатальная ошибка: {e}")
         import traceback
         traceback.print_exc()
+        exit(1)
