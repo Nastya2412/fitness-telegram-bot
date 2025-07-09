@@ -3,7 +3,8 @@ import asyncio
 import logging
 import os
 import re
-import json  # Добавлен для Render.com
+import json
+import hashlib
 from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
@@ -452,7 +453,7 @@ def get_admin_menu():
         keyboard=[
             [KeyboardButton(text="⚙️ Настройки бота")],
             [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="📝 Правила")],
-            [KeyboardButton(text="📋 Проверить платежи")],  # ← НОВАЯ КНОПКА
+            [KeyboardButton(text="📋 Проверить платежи")],
             [KeyboardButton(text="✏️ Изменить правила")],
             [KeyboardButton(text="🏠 Главное меню")]
         ],
@@ -462,7 +463,7 @@ def get_admin_menu():
     return keyboard
 
 async def save_payment_to_sheets(telegram_id, amount, payment_type="transfer", status="pending", photo_file_id=None):
-    """Сохранить платеж в Google Sheets"""
+    """Сохранить платеж в Google Sheets - ВСЕГДА с статусом pending"""
     try:
         if users_sheet is None or payments_sheet is None:
             print("❌ Google Sheets не инициализированы")
@@ -475,26 +476,26 @@ async def save_payment_to_sheets(telegram_id, amount, payment_type="transfer", s
         
         current_sessions = UserManager.get_user_sessions_count(telegram_id)
         
-        # ИСПРАВЛЯЕМ СОХРАНЕНИЕ СУММЫ - убираем пробелы и форматируем как число
+        # ВСЕГДА сохраняем сумму как число, статус как "pending"
         amount_clean = float(amount) if amount else 0
         
         payment_row = [
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             user['name'],
             telegram_id,
-            amount_clean,  # Сохраняем как число, а не строку с пробелами
-            payment_type,
-            status,
+            amount_clean,  # Сохраняем как число
+            payment_type,  # "cash" или "transfer" - тип платежа
+            "pending",     # ВСЕГДА pending для новых платежей
             photo_file_id or "",
             f"drive_link_{datetime.now().strftime('%Y%m%d_%H%M%S')}" if photo_file_id else "",
-            "",
-            "",
+            "",  # confirmed_by - пустое
+            "",  # confirmation_date - пустое  
             current_sessions,
             ""
         ]
         payments_sheet.append_row(payment_row)
         
-        print(f"✅ Платеж сохранен в Google Sheets для {user['name']}: {amount_clean} сом")
+        print(f"✅ Платеж сохранен в Google Sheets для {user['name']}: {amount_clean} сом, статус: pending")
         return True
         
     except Exception as e:
@@ -508,118 +509,133 @@ async def update_payment_status(user_id: int, amount: float, new_status: str, ad
             print("❌ payments_sheet не инициализирован")
             return False
         
-        print(f"🔍 Ищем платеж: user_id={user_id}, amount={amount}, status=pending")
+        print(f"🔍 Поиск платежа: user_id={user_id}, amount={amount}, new_status={new_status}")
         
         # Получаем все платежи
         payments = payments_sheet.get_all_records()
-        print(f"🔍 Всего платежей в таблице: {len(payments)}")
         
-        # Ищем платеж для обновления
-        found_payment_row = None
+        # Ищем pending платеж пользователя с указанной суммой
         for i, payment in enumerate(payments, start=2):  # start=2 потому что строка 1 - заголовки
-            print(f"🔍 Проверяем платеж {i-1}: telegram_id={payment.get('telegram_id')}, amount={payment.get('amount')}, status={payment.get('status')}")
-            
-            # Проверяем совпадение (исправляем проблемы с типами данных)
             payment_user_id = str(payment.get('telegram_id', ''))
             payment_amount = payment.get('amount', '')
-            payment_status = str(payment.get('status', ''))
+            payment_status = str(payment.get('status', '')).lower()
             
-            # ИСПРАВЛЕННОЕ ПРЕОБРАЗОВАНИЕ AMOUNT К FLOAT
+            # Обрабатываем amount (может быть строкой с пробелами)
             try:
-                # Удаляем пробелы и заменяем запятую на точку
-                amount_cleaned = str(payment_amount).replace(' ', '').replace(',', '.')
-                payment_amount_float = float(amount_cleaned)
-                print(f"✅ Успешно преобразовали '{payment_amount}' -> {payment_amount_float}")
-            except (ValueError, TypeError):
-                print(f"⚠️ Не удалось преобразовать amount в float: {payment_amount}")
+                if isinstance(payment_amount, str):
+                    amount_cleaned = str(payment_amount).replace(' ', '').replace(',', '.')
+                    payment_amount_float = float(amount_cleaned)
+                else:
+                    payment_amount_float = float(payment_amount)
+            except:
                 continue
             
-            # УЛУЧШЕННАЯ ПРОВЕРКА СОВПАДЕНИЯ
-            user_id_match = payment_user_id == str(user_id)
-            # Сравниваем как точно, так и приближенно
-            amount_exact_match = payment_amount_float == float(amount)
-            amount_approx_match = abs(payment_amount_float - float(amount)) < 0.01
-            # ИСПРАВЛЯЕМ ПРОВЕРКУ СТАТУСА - ищем и pending и другие статусы
-            status_match = payment_status.lower() in ['pending', 'cash', 'transfer']
-            
-            print(f"🔍 Проверка совпадений:")
-            print(f"   - User ID: {payment_user_id} == {user_id} -> {user_id_match}")
-            print(f"   - Amount: {payment_amount_float} ~= {amount} -> {amount_exact_match or amount_approx_match}")
-            print(f"   - Status: {payment_status} in [pending, cash, transfer] -> {status_match}")
-            
-            if user_id_match and (amount_exact_match or amount_approx_match) and status_match:
-                found_payment_row = i
-                print(f"✅ Найден платеж для обновления в строке {i}")
-                print(f"   - User ID: {payment_user_id} == {user_id}")
-                print(f"   - Amount: {payment_amount_float} ~= {amount}")
-                print(f"   - Status: {payment_status}")
-                break
-        
-        if found_payment_row is None:
-            print(f"❌ Платеж не найден для пользователя {user_id} на сумму {amount}")
-            
-            # ДОПОЛНИТЕЛЬНЫЙ ПОИСК - ищем последний платеж пользователя
-            print("🔍 Ищем последний платеж пользователя...")
-            user_payments = []
-            for i, payment in enumerate(payments, start=2):
-                if str(payment.get('telegram_id')) == str(user_id):
-                    user_payments.append((i, payment))
-            
-            if user_payments:
-                print(f"🔍 Найдено {len(user_payments)} платежей пользователя:")
-                for row_num, payment in user_payments[-3:]:  # Показываем последние 3
-                    print(f"   Строка {row_num}: Amount={payment.get('amount')}, Status={payment.get('status')}, Time={payment.get('timestamp')}")
+            # Проверяем соответствие
+            if (payment_user_id == str(user_id) and 
+                abs(payment_amount_float - amount) < 0.01 and  # Допускаем небольшую погрешность
+                payment_status == 'pending'):
                 
-                # Попробуем найти по более мягким критериям
-                for row_num, payment in reversed(user_payments):  # Идем с конца
-                    payment_amount = payment.get('amount', '')
-                    payment_status = str(payment.get('status', ''))
-                    
-                    try:
-                        # ИСПРАВЛЕННОЕ ПРЕОБРАЗОВАНИЕ для поиска по мягким критериям
-                        amount_cleaned = str(payment_amount).replace(' ', '').replace(',', '.')
-                        payment_amount_float = float(amount_cleaned)
-                        
-                        # Ищем любой платеж с нужной суммой, независимо от статуса
-                        if abs(payment_amount_float - float(amount)) < 0.01:
-                            found_payment_row = row_num
-                            print(f"✅ Найден платеж по мягким критериям в строке {row_num}")
-                            print(f"   Amount: {payment_amount} -> {payment_amount_float}")
-                            print(f"   Status: {payment_status}")
-                            break
-                    except:
-                        continue
-            
-            if found_payment_row is None:
-                return False
+                print(f"✅ Найден платеж в строке {i}")
+                
+                # Обновляем статус (колонка 6)
+                payments_sheet.update_cell(i, 6, new_status)
+                
+                # Обновляем информацию о подтверждении
+                admin_info = f"admin_id_{admin_id}"
+                confirmation_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                
+                # Колонка 9 - confirmed_by
+                payments_sheet.update_cell(i, 9, admin_info)
+                
+                # Колонка 10 - confirmation_date
+                payments_sheet.update_cell(i, 10, confirmation_date)
+                
+                print(f"✅ Статус платежа обновлен на '{new_status}'")
+                
+                # Если статус "confirmed", обновляем данные пользователя
+                if new_status == "confirmed":
+                    await update_user_after_payment_confirmation(user_id, amount, confirmation_date)
+                
+                return True
         
-        # Обновляем найденный платеж
-        try:
-            # Колонка 6 - status (считаем от 1)
-            payments_sheet.update_cell(found_payment_row, 6, new_status)
-            print(f"✅ Обновили статус в ячейке ({found_payment_row}, 6) на '{new_status}'")
-            
-            # Колонка 9 - confirmed_by
-            payments_sheet.update_cell(found_payment_row, 9, str(admin_id))
-            print(f"✅ Обновили confirmed_by в ячейке ({found_payment_row}, 9)")
-            
-            # Колонка 10 - confirmation_date
-            confirmation_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            payments_sheet.update_cell(found_payment_row, 10, confirmation_date)
-            print(f"✅ Обновили confirmation_date в ячейке ({found_payment_row}, 10)")
-            
-            print(f"✅ Статус платежа успешно обновлен: {new_status} для пользователя {user_id}")
-            return True
-            
-        except Exception as update_error:
-            print(f"❌ Ошибка при обновлении ячеек: {update_error}")
-            return False
+        print(f"❌ Платеж не найден для обновления")
+        return False
         
     except Exception as e:
         print(f"❌ Ошибка обновления статуса платежа: {e}")
-        import traceback
-        traceback.print_exc()
         return False
+
+async def update_user_after_payment_confirmation(user_id: int, amount: float, confirmation_date: str):
+    """Обновить данные пользователя после подтверждения платежа"""
+    try:
+        if users_sheet is None:
+            print("❌ users_sheet не инициализирован")
+            return False
+        
+        print(f"🔄 Обновляем данные пользователя {user_id} после подтверждения платежа")
+        
+        # Получаем все записи пользователей
+        users = users_sheet.get_all_records()
+        
+        # Ищем пользователя для обновления
+        for i, user in enumerate(users, start=2):  # start=2 потому что строка 1 - заголовки
+            if str(user.get('telegram_id')) == str(user_id):
+                print(f"✅ Найден пользователь в строке {i}")
+                
+                # Обновляем данные последней оплаты
+                # Колонка 9 - last_payment_date
+                users_sheet.update_cell(i, 9, confirmation_date.split()[0])  # Только дата без времени
+                
+                # Колонка 10 - last_payment_amount  
+                users_sheet.update_cell(i, 10, amount)
+                
+                # Колонка 12 - status (активируем пользователя)
+                users_sheet.update_cell(i, 12, "active")
+                
+                print(f"✅ Обновлены данные пользователя:")
+                print(f"   - last_payment_date: {confirmation_date.split()[0]}")
+                print(f"   - last_payment_amount: {amount}")
+                print(f"   - status: active")
+                
+                return True
+        
+        print(f"❌ Пользователь {user_id} не найден для обновления данных")
+        return False
+        
+    except Exception as e:
+        print(f"❌ Ошибка обновления данных пользователя: {e}")
+        return False
+
+def create_short_callback_data(action: str, user_id: int, amount: float):
+    """Создать короткий callback_data с хешированием при необходимости"""
+    try:
+        amount_str = str(int(amount)) if amount == int(amount) else str(amount)
+        callback_data = f"{action}_{user_id}_{amount_str}"
+        
+        # Если callback_data слишком длинный, используем hash
+        if len(callback_data) > 60:  # Оставляем запас до лимита 64
+            user_hash = hashlib.md5(str(user_id).encode()).hexdigest()[:8]
+            amount_hash = hashlib.md5(str(amount_str).encode()).hexdigest()[:6]
+            callback_data = f"{action}_{user_hash}_{amount_hash}"
+            
+            # Сохраняем mapping для обратного поиска
+            save_callback_mapping(callback_data, user_id, amount)
+        
+        return callback_data
+    except Exception as e:
+        print(f"❌ Ошибка создания callback_data: {e}")
+        return f"{action}_error"
+
+# Простое хранилище mapping для callback (в памяти)
+callback_mappings = {}
+
+def save_callback_mapping(callback_data: str, user_id: int, amount: float):
+    """Сохранить mapping hash -> реальные данные"""
+    callback_mappings[callback_data] = {'user_id': user_id, 'amount': amount}
+
+def get_callback_mapping(callback_data: str):
+    """Получить реальные данные по hash"""
+    return callback_mappings.get(callback_data)
 
 async def send_payment_confirmation_to_admin(user_id: int, amount: float, photo_file_id: str = None):
     """Отправить админу уведомление о платеже с кнопками подтверждения"""
@@ -631,12 +647,9 @@ async def send_payment_confirmation_to_admin(user_id: int, amount: float, photo_
         
         payment_type = "💳 Перевод" if photo_file_id else "💵 Наличные"
         
-        # ИСПРАВЛЯЕМ СОЗДАНИЕ CALLBACK_DATA - делаем короче
-        amount_str = str(int(amount)) if amount == int(amount) else str(amount)
-        
-        # УКОРАЧИВАЕМ CALLBACK_DATA чтобы избежать обрезания
-        confirm_callback = f"pay_ok_{user_id}_{amount_str}"
-        reject_callback = f"pay_no_{user_id}_{amount_str}"
+        # Создаем короткие callback_data
+        confirm_callback = create_short_callback_data("pay_ok", user_id, amount)
+        reject_callback = create_short_callback_data("pay_no", user_id, amount)
         
         print(f"🔍 Создаем кнопки с callback_data:")
         print(f"   Подтвердить: {confirm_callback} (длина: {len(confirm_callback)})")
@@ -656,13 +669,16 @@ async def send_payment_confirmation_to_admin(user_id: int, amount: float, photo_
             ]
         ])
         
+        amount_str = str(int(amount)) if amount == int(amount) else str(amount)
+        
         message_text = (
             f"💳 **НОВЫЙ ПЛАТЕЖ**\n\n"
             f"👤 **Клиент:** {user['name']}\n"
             f"💰 **Сумма:** {amount_str} сом\n"
             f"💳 **Тип:** {payment_type}\n"
             f"🆔 **ID:** `{user_id}`\n"
-            f"📅 **Время:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"📅 **Время:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"🔄 **Статус:** PENDING\n\n"
             f"❓ **Подтвердить платеж?**"
         )
         
@@ -729,6 +745,68 @@ async def notify_admin_on_error(error_text: str):
         await bot.send_message(ADMIN_ID, f"⚠️ ОШИБКА В БОТЕ:\n\n{clean_error}")
     except Exception as e:
         print(f"Ошибка отправки уведомления админу: {e}")
+
+def get_user_last_payment(user_id: int):
+    """Получить информацию о последней оплате пользователя"""
+    try:
+        if payments_sheet is None:
+            return None
+        
+        payments = payments_sheet.get_all_records()
+        
+        # Ищем последнюю подтвержденную оплату пользователя
+        user_payments = []
+        for payment in payments:
+            if (str(payment.get('telegram_id')) == str(user_id) and 
+                str(payment.get('status', '')).lower() == 'confirmed'):
+                user_payments.append(payment)
+        
+        if not user_payments:
+            return None
+        
+        # Сортируем по дате (последняя первая)
+        user_payments.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+        last_payment = user_payments[0]
+        
+        # Обрабатываем сумму
+        amount = last_payment.get('amount', 0)
+        if isinstance(amount, str):
+            amount_cleaned = str(amount).replace(' ', '').replace(',', '.')
+            try:
+                amount = float(amount_cleaned)
+            except:
+                amount = 0
+        
+        return {
+            'amount': amount,
+            'date': last_payment.get('confirmation_date', last_payment.get('timestamp', 'Не указано')).split()[0],
+            'status': 'подтвержден'
+        }
+        
+    except Exception as e:
+        print(f"❌ Ошибка получения последней оплаты: {e}")
+        return None
+
+def get_user_pending_payments_count(user_id: int):
+    """Получить количество pending платежей пользователя"""
+    try:
+        if payments_sheet is None:
+            return 0
+        
+        payments = payments_sheet.get_all_records()
+        
+        # Считаем pending платежи пользователя
+        pending_count = 0
+        for payment in payments:
+            if (str(payment.get('telegram_id')) == str(user_id) and 
+                str(payment.get('status', '')).lower() == 'pending'):
+                pending_count += 1
+        
+        return pending_count
+        
+    except Exception as e:
+        print(f"❌ Ошибка подсчета pending платежей: {e}")
+        return 0
 
 # Настройка команд бота
 async def set_bot_commands():
@@ -918,7 +996,7 @@ async def cmd_payment(message: Message, state: FSMContext):
 
 @router.message(Command("profile"))
 async def cmd_profile(message: Message):
-    """Команда /profile - показать профиль пользователя"""
+    """Команда /profile - показать профиль пользователя с актуальными данными"""
     print(f"🔍 Команда /profile от пользователя {message.from_user.id}")
     
     user_id = message.from_user.id
@@ -928,27 +1006,66 @@ async def cmd_profile(message: Message):
         await message.answer("❌ Сначала пройдите регистрацию командой /start")
         return
     
-    sessions_count = UserManager.get_user_sessions_count(user_id)
-    sessions_per_month = SettingsManager.get_setting('sessions_per_month', DEFAULT_SETTINGS['sessions_per_month'])
-    sessions_left = max(0, sessions_per_month - sessions_count)
-    monthly_price = SettingsManager.get_setting('monthly_price', DEFAULT_SETTINGS['monthly_price'])
-    
-    profile_text = (
-        f"📋 Ваш профиль\n\n"
-        f"👤 Имя: {user.get('name', 'Не указано')}\n"
-        f"📱 Телефон: {user.get('phone', 'Не указан')}\n"
-        f"📅 График: {user.get('schedule', 'Не указан')}\n\n"
-        f"🏋️ Посещения:\n"
-        f"• Посещено занятий: {sessions_count}\n"
-        f"• Осталось занятий: {sessions_left}\n\n"
-        f"💳 Последняя оплата:\n"
-        f"• Сумма: {user.get('last_payment_amount', 'Нет данных')} сом\n"
-        f"• Дата: {user.get('last_payment_date', 'Нет данных')}\n"
-        f"• Статус: {user.get('status', 'active')}\n"
-        f"\n💡 Текущая стоимость: {monthly_price} сом за {sessions_per_month} занятий"
-    )
-    
-    await message.answer(profile_text)
+    # Получаем актуальные данные из Google Sheets
+    try:
+        # Подсчитываем посещения
+        sessions_count = UserManager.get_user_sessions_count(user_id)
+        sessions_per_month = SettingsManager.get_setting('sessions_per_month', DEFAULT_SETTINGS['sessions_per_month'])
+        sessions_left = max(0, sessions_per_month - sessions_count)
+        monthly_price = SettingsManager.get_setting('monthly_price', DEFAULT_SETTINGS['monthly_price'])
+        
+        # Получаем информацию о последней оплате из истории платежей
+        last_payment_info = get_user_last_payment(user_id)
+        
+        # Получаем информацию о pending платежах
+        pending_payments_count = get_user_pending_payments_count(user_id)
+        
+        profile_text = (
+            f"📋 **Ваш профиль**\n\n"
+            f"👤 **Имя:** {user.get('name', 'Не указано')}\n"
+            f"📱 **Телефон:** {user.get('phone', 'Не указан')}\n"
+            f"📅 **График:** {user.get('schedule', 'Не указан')}\n"
+            f"🔄 **Статус:** {user.get('status', 'active')}\n\n"
+            f"🏋️ **Посещения:**\n"
+            f"• Посещено занятий: **{sessions_count}**\n"
+            f"• Осталось занятий: **{sessions_left}**\n\n"
+        )
+        
+        # Добавляем информацию о последней оплате
+        if last_payment_info:
+            profile_text += (
+                f"💳 **Последняя оплата:**\n"
+                f"• Сумма: **{last_payment_info['amount']} сом**\n"
+                f"• Дата: **{last_payment_info['date']}**\n"
+                f"• Статус: **{last_payment_info['status']}**\n\n"
+            )
+        else:
+            profile_text += (
+                f"💳 **Последняя оплата:**\n"
+                f"• Нет данных об оплатах\n\n"
+            )
+        
+        # Добавляем информацию о pending платежах
+        if pending_payments_count > 0:
+            profile_text += (
+                f"⏳ **Ожидают подтверждения:** {pending_payments_count} платеж(ей)\n\n"
+            )
+        
+        profile_text += f"💡 **Текущая стоимость:** {monthly_price} сом за {sessions_per_month} занятий"
+        
+        await message.answer(profile_text, parse_mode="Markdown")
+        
+    except Exception as e:
+        print(f"❌ Ошибка получения данных профиля: {e}")
+        # Fallback к базовому профилю
+        await message.answer(
+            f"📋 Ваш профиль\n\n"
+            f"👤 Имя: {user.get('name', 'Не указано')}\n"
+            f"📱 Телефон: {user.get('phone', 'Не указан')}\n"
+            f"📅 График: {user.get('schedule', 'Не указан')}\n"
+            f"🔄 Статус: {user.get('status', 'active')}\n\n"
+            f"⚠️ Не удалось загрузить актуальные данные"
+        )
 
 @router.message(Command("sick"))
 async def cmd_sick(message: Message):
@@ -1430,8 +1547,6 @@ async def admin_stats(message: Message):
     except Exception as e:
         print(f"Ошибка получения статистики: {e}")
         await message.answer("❌ Ошибка при получении статистики")
-# Обработчик кнопки "📋 Проверить платежи"
-# ОБНОВИТЕ ФУНКЦИЮ check_pending_payments:
 
 @router.message(F.text == "📋 Проверить платежи")
 async def check_pending_payments(message: Message):
@@ -1448,8 +1563,8 @@ async def check_pending_payments(message: Message):
         await message.answer("🔍 Проверяю платежи...")
         
         payments = payments_sheet.get_all_records()
-        # ИСПРАВЛЯЕМ ПОИСК PENDING ПЛАТЕЖЕЙ
-        pending = [p for p in payments if str(p.get('status', '')).lower() in ['pending', 'cash', 'transfer']]
+        # ИЩЕМ ТОЛЬКО ПЛАТЕЖИ СО СТАТУСОМ "pending"
+        pending = [p for p in payments if str(p.get('status', '')).lower() == 'pending']
         
         if not pending:
             await message.answer("✅ Нет платежей, ожидающих подтверждения")
@@ -1465,7 +1580,7 @@ async def check_pending_payments(message: Message):
             timestamp = p.get('timestamp', 'Не указано')
             payment_type = p.get('payment_type', 'Не указан')
             
-            # ИСПРАВЛЯЕМ ОБРАБОТКУ AMOUNT с пробелами
+            # Обрабатываем amount
             try:
                 if isinstance(amount, str):
                     amount_cleaned = str(amount).replace(' ', '').replace(',', '.')
@@ -1473,11 +1588,9 @@ async def check_pending_payments(message: Message):
                 else:
                     amount_float = float(amount)
                 
-                amount_str = str(int(amount_float)) if amount_float == int(amount_float) else str(amount_float)
-                
-                # ИСПОЛЬЗУЕМ НОВЫЕ КОРОТКИЕ CALLBACK_DATA
-                confirm_callback = f"pay_ok_{user_id}_{amount_str}"
-                reject_callback = f"pay_no_{user_id}_{amount_str}"
+                # Создаем короткие callback_data с проверкой длины
+                confirm_callback = create_short_callback_data("pay_ok", int(user_id), amount_float)
+                reject_callback = create_short_callback_data("pay_no", int(user_id), amount_float)
                 
                 print(f"🔍 Создаем кнопки для платежа #{i}:")
                 print(f"   Подтвердить: {confirm_callback} (длина: {len(confirm_callback)})")
@@ -1496,14 +1609,18 @@ async def check_pending_payments(message: Message):
                     ]
                 ])
                 
+                # Определяем тип платежа для отображения
+                payment_type_display = "💳 Перевод" if payment_type == "transfer" else "💵 Наличные"
+                
                 # Отправляем каждый платеж отдельным сообщением с кнопками
                 payment_text = (
                     f"**💳 Платеж #{i}**\n\n"
                     f"👤 **Клиент:** {user_name}\n"
                     f"💰 **Сумма:** {amount} сом\n"
-                    f"💳 **Тип:** {payment_type}\n"
+                    f"💳 **Тип:** {payment_type_display}\n"
                     f"🆔 **ID:** `{user_id}`\n"
-                    f"📅 **Время:** {timestamp}\n\n"
+                    f"📅 **Время:** {timestamp}\n"
+                    f"🔄 **Статус:** PENDING\n\n"
                     f"❓ **Подтвердить платеж?**"
                 )
                 
@@ -1511,7 +1628,7 @@ async def check_pending_payments(message: Message):
                 
             except Exception as button_error:
                 print(f"❌ Ошибка создания кнопок для платежа: {button_error}")
-                # Отправляем без кнопок
+                # Отправляем без кнопок с информацией об ошибке
                 payment_text = (
                     f"**💳 Платеж #{i} (БЕЗ КНОПОК)**\n\n"
                     f"👤 **Клиент:** {user_name}\n"
@@ -1525,7 +1642,7 @@ async def check_pending_payments(message: Message):
         # Общая сводка
         if len(pending) > 10:
             summary_text = f"📊 **СВОДКА**\n\n"
-            summary_text += f"Всего платежей в ожидании: **{len(pending)}**\n"
+            summary_text += f"Всего PENDING платежей: **{len(pending)}**\n"
             summary_text += f"Показано последних: **{min(10, len(pending))}**\n\n"
             summary_text += f"💡 Используйте кнопки выше для подтверждения"
             
@@ -1563,7 +1680,7 @@ async def menu_main(message: Message):
     else:
         await message.answer("❌ Сначала пройдите регистрацию командой /start")
 
-# НОВЫЕ ОБРАБОТЧИКИ ПЛАТЕЖЕЙ
+# ОБРАБОТЧИКИ ПЛАТЕЖЕЙ
 
 @router.callback_query(F.data == "payment_transfer")
 async def payment_transfer_selected(callback: CallbackQuery, state: FSMContext):
@@ -1722,28 +1839,37 @@ async def close_settings_callback(callback: CallbackQuery):
     await callback.message.answer("⚙️ Настройки закрыты")
     await callback.answer()
 
+# ОБРАБОТЧИКИ ПОДТВЕРЖДЕНИЯ ПЛАТЕЖЕЙ
+
 @router.callback_query(F.data.startswith("pay_ok_"))
 async def confirm_payment_callback(callback: CallbackQuery):
     """Подтверждение платежа администратором"""
     try:
-        print(f"🔍 Получен callback: {callback.data}")
+        print(f"🔍 Получен callback подтверждения: {callback.data}")
         
-        # ПАРСИНГ НОВЫХ КОРОТКИХ CALLBACK_DATA
-        callback_parts = callback.data.split("_")
-        if len(callback_parts) < 4:
-            print(f"❌ Неверный формат callback_data: {callback.data}")
-            await callback.answer("❌ Ошибка формата данных")
-            return
+        # Сначала пытаемся найти в mapping
+        mapping_data = get_callback_mapping(callback.data)
+        if mapping_data:
+            user_id = mapping_data['user_id']
+            amount = mapping_data['amount']
+            print(f"🔍 Найдено в mapping: user_id={user_id}, amount={amount}")
+        else:
+            # Парсинг обычного callback_data
+            callback_parts = callback.data.split("_")
+            if len(callback_parts) < 4:
+                print(f"❌ Неверный формат callback_data: {callback.data}")
+                await callback.answer("❌ Ошибка формата данных")
+                return
+            
+            try:
+                user_id = int(callback_parts[2])
+                amount = float(callback_parts[3])
+            except (ValueError, IndexError) as e:
+                print(f"❌ Ошибка парсинга данных: {e}")
+                await callback.answer("❌ Ошибка данных платежа")
+                return
         
-        try:
-            user_id = int(callback_parts[2])
-            amount = float(callback_parts[3])
-        except (ValueError, IndexError) as e:
-            print(f"❌ Ошибка парсинга данных: {e}")
-            await callback.answer("❌ Ошибка данных платежа")
-            return
-        
-        print(f"🔍 Парсинг: user_id={user_id}, amount={amount}")
+        print(f"🔍 Обрабатываем: user_id={user_id}, amount={amount}")
         
         user = UserManager.get_user(user_id)
         if not user:
@@ -1767,7 +1893,8 @@ async def confirm_payment_callback(callback: CallbackQuery):
                     f"💰 Сумма: **{amount} сом**\n"
                     f"👨‍💼 Подтверждено администратором\n"
                     f"📅 Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                    f"🎉 Спасибо за оплату!",
+                    f"🎉 Спасибо за оплату!\n"
+                    f"💡 Используйте /profile для просмотра актуальной информации",
                     parse_mode="Markdown"
                 )
                 print("✅ Уведомление клиенту отправлено")
@@ -1776,24 +1903,25 @@ async def confirm_payment_callback(callback: CallbackQuery):
             
             # Обновляем сообщение админа
             try:
+                new_text = (
+                    f"✅ **ПЛАТЕЖ ПОДТВЕРЖДЕН**\n\n"
+                    f"👤 **Клиент:** {user['name']}\n"
+                    f"💰 **Сумма:** {amount} сом\n"
+                    f"🆔 **ID:** `{user_id}`\n"
+                    f"📅 **Подтверждено:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"👨‍💼 **Админ:** {callback.from_user.first_name or 'Администратор'}"
+                )
+                
                 if callback.message.photo:
                     # Если сообщение с фото
                     await callback.message.edit_caption(
-                        caption=f"✅ **ПЛАТЕЖ ПОДТВЕРЖДЕН**\n\n"
-                                f"👤 **Клиент:** {user['name']}\n"
-                                f"💰 **Сумма:** {amount} сом\n"
-                                f"🆔 **ID:** `{user_id}`\n"
-                                f"📅 **Подтверждено:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                        caption=new_text,
                         parse_mode="Markdown"
                     )
                 else:
                     # Если обычное сообщение
                     await callback.message.edit_text(
-                        text=f"✅ **ПЛАТЕЖ ПОДТВЕРЖДЕН**\n\n"
-                             f"👤 **Клиент:** {user['name']}\n"
-                             f"💰 **Сумма:** {amount} сом\n"
-                             f"🆔 **ID:** `{user_id}`\n"
-                             f"📅 **Подтверждено:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                        text=new_text,
                         parse_mode="Markdown"
                     )
                 print("✅ Сообщение админа обновлено")
@@ -1817,20 +1945,26 @@ async def reject_payment_callback(callback: CallbackQuery):
     try:
         print(f"🔍 Получен callback отклонения: {callback.data}")
         
-        # ПАРСИНГ НОВЫХ КОРОТКИХ CALLBACK_DATA
-        callback_parts = callback.data.split("_")
-        if len(callback_parts) < 4:
-            print(f"❌ Неверный формат callback_data: {callback.data}")
-            await callback.answer("❌ Ошибка формата данных")
-            return
-            
-        try:
-            user_id = int(callback_parts[2])
-            amount = float(callback_parts[3])
-        except (ValueError, IndexError) as e:
-            print(f"❌ Ошибка парсинга данных: {e}")
-            await callback.answer("❌ Ошибка данных платежа")
-            return
+        # Сначала пытаемся найти в mapping
+        mapping_data = get_callback_mapping(callback.data)
+        if mapping_data:
+            user_id = mapping_data['user_id']
+            amount = mapping_data['amount']
+        else:
+            # Парсинг обычного callback_data
+            callback_parts = callback.data.split("_")
+            if len(callback_parts) < 4:
+                print(f"❌ Неверный формат callback_data: {callback.data}")
+                await callback.answer("❌ Ошибка формата данных")
+                return
+                
+            try:
+                user_id = int(callback_parts[2])
+                amount = float(callback_parts[3])
+            except (ValueError, IndexError) as e:
+                print(f"❌ Ошибка парсинга данных: {e}")
+                await callback.answer("❌ Ошибка данных платежа")
+                return
         
         user = UserManager.get_user(user_id)
         if not user:
@@ -1849,7 +1983,7 @@ async def reject_payment_callback(callback: CallbackQuery):
                     f"💰 Сумма: **{amount} сом**\n"
                     f"👨‍💼 Отклонено администратором\n"
                     f"📅 Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                    f"📞 Свяжитесь с администратором для уточнения",
+                    f"📞 Свяжитесь с администратором для уточнения причины",
                     parse_mode="Markdown"
                 )
             except Exception as notify_error:
@@ -1857,22 +1991,23 @@ async def reject_payment_callback(callback: CallbackQuery):
             
             # Обновляем сообщение админа
             try:
+                new_text = (
+                    f"❌ **ПЛАТЕЖ ОТКЛОНЕН**\n\n"
+                    f"👤 **Клиент:** {user['name']}\n"
+                    f"💰 **Сумма:** {amount} сом\n"
+                    f"🆔 **ID:** `{user_id}`\n"
+                    f"📅 **Отклонено:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"👨‍💼 **Админ:** {callback.from_user.first_name or 'Администратор'}"
+                )
+                
                 if callback.message.photo:
                     await callback.message.edit_caption(
-                        caption=f"❌ **ПЛАТЕЖ ОТКЛОНЕН**\n\n"
-                                f"👤 **Клиент:** {user['name']}\n"
-                                f"💰 **Сумма:** {amount} сом\n"
-                                f"🆔 **ID:** `{user_id}`\n"
-                                f"📅 **Отклонено:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                        caption=new_text,
                         parse_mode="Markdown"
                     )
                 else:
                     await callback.message.edit_text(
-                        text=f"❌ **ПЛАТЕЖ ОТКЛОНЕН**\n\n"
-                             f"👤 **Клиент:** {user['name']}\n"
-                             f"💰 **Сумма:** {amount} сом\n"
-                             f"🆔 **ID:** `{user_id}`\n"
-                             f"📅 **Отклонено:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                        text=new_text,
                         parse_mode="Markdown"
                     )
             except Exception as edit_error:
@@ -1888,7 +2023,8 @@ async def reject_payment_callback(callback: CallbackQuery):
         traceback.print_exc()
         await callback.answer("❌ Ошибка при отклонении")
 
-# Обработчик состояний регистрации
+# ОБРАБОТЧИКИ СОСТОЯНИЙ РЕГИСТРАЦИИ
+
 @router.message(RegistrationStates.waiting_for_name)
 async def process_registration_name(message: Message, state: FSMContext):
     """Обработка имени при регистрации"""
@@ -1959,7 +2095,7 @@ async def process_registration_schedule(message: Message, state: FSMContext):
     
     await state.clear()
 
-# НОВЫЕ ОБРАБОТЧИКИ СОСТОЯНИЙ ПЛАТЕЖА
+# ОБРАБОТЧИКИ СОСТОЯНИЙ ПЛАТЕЖА
 
 @router.message(PaymentStates.waiting_for_amount)
 async def process_payment_amount(message: Message, state: FSMContext):
@@ -2050,7 +2186,7 @@ async def process_payment_no_photo(message: Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-# ВАЖНО: Обработчик неизвестных сообщений должен быть ПОСЛЕДНИМ!
+# ОБРАБОТЧИК НЕИЗВЕСТНЫХ СООБЩЕНИЙ (ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ!)
 @router.message(F.text)
 async def handle_unknown_text(message: Message, state: FSMContext):
     """Обработка неизвестных текстовых сообщений - ПОСЛЕДНИЙ обработчик!"""
@@ -2079,6 +2215,9 @@ async def handle_unknown_text(message: Message, state: FSMContext):
             )
         else:
             await message.answer("👋 Привет! Для начала работы нажмите /start")
+
+# ВЕБ-СЕРВЕР ДЛЯ ПОДДЕРЖАНИЯ АКТИВНОСТИ
+
 async def health_check(request):
     """Healthcheck endpoint для поддержания активности"""
     try:
@@ -2182,7 +2321,9 @@ async def start_web_server():
     except Exception as e:
         print(f"❌ Ошибка запуска веб-сервера: {e}")
         return None
-        
+
+# ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА
+
 async def main():
     """Основная функция запуска бота"""
     try:
