@@ -509,60 +509,117 @@ async def update_payment_status(user_id: int, amount: float, new_status: str, ad
             print("❌ payments_sheet не инициализирован")
             return False
         
-        print(f"🔍 Поиск платежа: user_id={user_id}, amount={amount}, new_status={new_status}")
+        print(f"🔍 Ищем платеж: user_id={user_id}, amount={amount}, status=pending")
         
         # Получаем все платежи
         payments = payments_sheet.get_all_records()
+        print(f"🔍 Всего платежей в таблице: {len(payments)}")
         
-        # Ищем pending платеж пользователя с указанной суммой
+        # Ищем платеж для обновления
+        found_payment_row = None
         for i, payment in enumerate(payments, start=2):  # start=2 потому что строка 1 - заголовки
+            print(f"🔍 Проверяем платеж {i-1}: telegram_id={payment.get('telegram_id')}, amount={payment.get('amount')}, status={payment.get('status')}")
+            
+            # Проверяем совпадение (исправляем проблемы с типами данных)
             payment_user_id = str(payment.get('telegram_id', ''))
             payment_amount = payment.get('amount', '')
-            payment_status = str(payment.get('status', '')).lower()
+            payment_status = str(payment.get('status', ''))
             
-            # Обрабатываем amount (может быть строкой с пробелами)
+            # ИСПРАВЛЕННОЕ ПРЕОБРАЗОВАНИЕ AMOUNT К FLOAT
             try:
-                if isinstance(payment_amount, str):
-                    amount_cleaned = str(payment_amount).replace(' ', '').replace(',', '.')
-                    payment_amount_float = float(amount_cleaned)
-                else:
-                    payment_amount_float = float(payment_amount)
-            except:
+                # Удаляем пробелы и заменяем запятую на точку
+                amount_cleaned = str(payment_amount).replace(' ', '').replace(',', '.')
+                payment_amount_float = float(amount_cleaned)
+                print(f"✅ Успешно преобразовали '{payment_amount}' -> {payment_amount_float}")
+            except (ValueError, TypeError):
+                print(f"⚠️ Не удалось преобразовать amount в float: {payment_amount}")
                 continue
             
-            # Проверяем соответствие
-            if (payment_user_id == str(user_id) and 
-                abs(payment_amount_float - amount) < 0.01 and  # Допускаем небольшую погрешность
-                payment_status == 'pending'):
-                
-                print(f"✅ Найден платеж в строке {i}")
-                
-                # Обновляем статус (колонка 6)
-                payments_sheet.update_cell(i, 6, new_status)
-                
-                # Обновляем информацию о подтверждении
-                admin_info = f"admin_id_{admin_id}"
-                confirmation_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
-                # Колонка 9 - confirmed_by
-                payments_sheet.update_cell(i, 9, admin_info)
-                
-                # Колонка 10 - confirmation_date
-                payments_sheet.update_cell(i, 10, confirmation_date)
-                
-                print(f"✅ Статус платежа обновлен на '{new_status}'")
-                
-                # Если статус "confirmed", обновляем данные пользователя
-                if new_status == "confirmed":
-                    await update_user_after_payment_confirmation(user_id, amount, confirmation_date)
-                
-                return True
+            # УЛУЧШЕННАЯ ПРОВЕРКА СОВПАДЕНИЯ
+            user_id_match = payment_user_id == str(user_id)
+            # Сравниваем как точно, так и приближенно
+            amount_exact_match = payment_amount_float == float(amount)
+            amount_approx_match = abs(payment_amount_float - float(amount)) < 0.01
+            # ИСПРАВЛЯЕМ ПРОВЕРКУ СТАТУСА - ищем и pending и другие статусы
+            status_match = payment_status.lower() in ['pending']
+            
+            print(f"🔍 Проверка совпадений:")
+            print(f"   - User ID: {payment_user_id} == {user_id} -> {user_id_match}")
+            print(f"   - Amount: {payment_amount_float} ~= {amount} -> {amount_exact_match or amount_approx_match}")
+            print(f"   - Status: {payment_status} in [pending] -> {status_match}")
+            
+            if user_id_match and (amount_exact_match or amount_approx_match) and status_match:
+                found_payment_row = i
+                print(f"✅ Найден платеж для обновления в строке {i}")
+                print(f"   - User ID: {payment_user_id} == {user_id}")
+                print(f"   - Amount: {payment_amount_float} ~= {amount}")
+                print(f"   - Status: {payment_status}")
+                break
         
-        print(f"❌ Платеж не найден для обновления")
-        return False
+        if found_payment_row is None:
+            print(f"❌ Платеж не найден для пользователя {user_id} на сумму {amount}")
+            
+            # ДОПОЛНИТЕЛЬНЫЙ ПОИСК - ищем последний платеж пользователя
+            print("🔍 Ищем последний платеж пользователя...")
+            user_payments = []
+            for i, payment in enumerate(payments, start=2):
+                if str(payment.get('telegram_id')) == str(user_id):
+                    user_payments.append((i, payment))
+            
+            if user_payments:
+                print(f"🔍 Найдено {len(user_payments)} платежей пользователя:")
+                for row_num, payment in user_payments[-3:]:  # Показываем последние 3
+                    print(f"   Строка {row_num}: Amount={payment.get('amount')}, Status={payment.get('status')}, Time={payment.get('timestamp')}")
+                
+                # Попробуем найти по более мягким критериям
+                for row_num, payment in reversed(user_payments):  # Идем с конца
+                    payment_amount = payment.get('amount', '')
+                    payment_status = str(payment.get('status', ''))
+                    
+                    try:
+                        # ИСПРАВЛЕННОЕ ПРЕОБРАЗОВАНИЕ для поиска по мягким критериям
+                        amount_cleaned = str(payment_amount).replace(' ', '').replace(',', '.')
+                        payment_amount_float = float(amount_cleaned)
+                        
+                        # Ищем любой платеж с нужной суммой, независимо от статуса
+                        if abs(payment_amount_float - float(amount)) < 0.01:
+                            found_payment_row = row_num
+                            print(f"✅ Найден платеж по мягким критериям в строке {row_num}")
+                            print(f"   Amount: {payment_amount} -> {payment_amount_float}")
+                            print(f"   Status: {payment_status}")
+                            break
+                    except:
+                        continue
+            
+            if found_payment_row is None:
+                return False
+        
+        # Обновляем найденный платеж
+        try:
+            # Колонка 6 - status (считаем от 1)
+            payments_sheet.update_cell(found_payment_row, 6, new_status)
+            print(f"✅ Обновили статус в ячейке ({found_payment_row}, 6) на '{new_status}'")
+            
+            # Колонка 9 - confirmed_by
+            payments_sheet.update_cell(found_payment_row, 9, str(admin_id))
+            print(f"✅ Обновили confirmed_by в ячейке ({found_payment_row}, 9)")
+            
+            # Колонка 10 - confirmation_date
+            confirmation_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            payments_sheet.update_cell(found_payment_row, 10, confirmation_date)
+            print(f"✅ Обновили confirmation_date в ячейке ({found_payment_row}, 10)")
+            
+            print(f"✅ Статус платежа успешно обновлен: {new_status} для пользователя {user_id}")
+            return True
+            
+        except Exception as update_error:
+            print(f"❌ Ошибка при обновлении ячеек: {update_error}")
+            return False
         
     except Exception as e:
         print(f"❌ Ошибка обновления статуса платежа: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 async def update_user_after_payment_confirmation(user_id: int, amount: float, confirmation_date: str):
